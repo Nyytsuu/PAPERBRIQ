@@ -1,0 +1,11 @@
+{
+  "name": "PaperBriq",
+  "short_name": "PaperBriq",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbfdfb",
+  "theme_color": "#0b7a31",
+  "orientation": "portrait",
+  "description": "Paper waste collection and briquette production operations app.",
+  "categories": ["productivity", "utilities"]
+}

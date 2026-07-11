@@ -1,0 +1,21 @@
+{
+  "name": "paperbriq",
+  "version": "0.1.0",
+  "description": "PaperBriq mobile-first Android web app with SQL-backed API.",
+  "main": "backend/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node backend/server.js",
+    "check": "node scripts/check.js",
+    "build": "node scripts/check.js",
+    "smoke:api": "node scripts/smoke-api.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.5",
+    "pg": "^8.13.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

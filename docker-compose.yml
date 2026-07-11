@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: paperbriq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paperbriq
+      POSTGRES_USER: paperbriq
+      POSTGRES_PASSWORD: paperbriq_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - paperbriq_pgdata:/var/lib/postgresql/data
+      - ./database/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperbriq -d paperbriq"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  paperbriq_pgdata:
