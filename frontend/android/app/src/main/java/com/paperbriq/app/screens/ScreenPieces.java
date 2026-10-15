@@ -12,16 +12,6 @@ public final class ScreenPieces {
     private ScreenPieces() {
     }
 
-    public static View processStepsCard(Ui ui) {
-        return ui.simpleList(new String[][]{
-            {"Done", "Collect Paper", "Collected: 45 kg / 60 kg"},
-            {"Live", "Shred Paper", "Shredding at 78%"},
-            {"Live", "Pulp and Mix", "Pulping mixture at 60%"},
-            {"Next", "Press and Mold", "0 / 20 briquettes"},
-            {"Next", "Drying", "Waiting to start"}
-        });
-    }
-
     public static View rewardCard(Ui ui, String name, String cost) {
         LinearLayout card = ui.card(16);
         card.setGravity(Gravity.CENTER);

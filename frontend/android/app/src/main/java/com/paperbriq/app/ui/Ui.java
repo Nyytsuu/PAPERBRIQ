@@ -10,10 +10,12 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.paperbriq.app.AppColors;
+import com.paperbriq.app.R;
 
 import java.util.Locale;
 
@@ -52,10 +54,13 @@ public class Ui {
         return view;
     }
 
-    public TextView brandMark(int sizeDp, int textSize) {
-        TextView mark = text("PB", textSize, AppColors.GREEN, Typeface.BOLD);
-        mark.setGravity(Gravity.CENTER);
-        mark.setBackground(round(AppColors.GREEN_SOFT, dp(sizeDp / 3), Color.argb(40, 10, 122, 50), 1));
+    public View brandMark(int sizeDp, int textSize) {
+        ImageView mark = new ImageView(activity);
+        mark.setImageResource(R.drawable.logo_paperbriq_mark);
+        mark.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        mark.setAdjustViewBounds(false);
+        mark.setContentDescription(null);
+        mark.setPadding(dp(Math.max(2, sizeDp / 12)), dp(Math.max(2, sizeDp / 12)), dp(Math.max(2, sizeDp / 12)), dp(Math.max(2, sizeDp / 12)));
         return mark;
     }
 
@@ -116,10 +121,7 @@ public class Ui {
     public View statCard(String title, String value, String subtitle, int accent) {
         LinearLayout card = card(18);
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
-        TextView icon = text(title.substring(0, 1), 18, accent, Typeface.BOLD);
-        icon.setGravity(Gravity.CENTER);
-        icon.setBackground(round(Color.argb(26, Color.red(accent), Color.green(accent), Color.blue(accent)), dp(20), Color.TRANSPARENT, 0));
-        card.addView(icon, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        card.addView(iconBadge(iconNameFor(title), accent, 42), new LinearLayout.LayoutParams(dp(42), dp(42)));
         card.addView(text(title, 13, AppColors.MUTED, Typeface.BOLD));
         card.addView(text(value, 24, AppColors.INK, Typeface.BOLD));
         card.addView(text(subtitle, 12, AppColors.MUTED, Typeface.NORMAL));
@@ -136,6 +138,7 @@ public class Ui {
         LinearLayout card = card(18);
         card.setGravity(Gravity.CENTER);
         card.setPadding(dp(14), dp(16), dp(14), dp(16));
+        card.addView(iconBadge(iconNameFor(title), AppColors.GREEN, 40), new LinearLayout.LayoutParams(dp(40), dp(40)));
         card.addView(text(title, 14, AppColors.INK, Typeface.BOLD));
         TextView gauge = text(value, 22, AppColors.GREEN_DARK, Typeface.BOLD);
         gauge.setGravity(Gravity.CENTER);
@@ -150,7 +153,7 @@ public class Ui {
         LinearLayout card = card(16);
         card.setGravity(Gravity.CENTER);
         card.setPadding(dp(12), dp(14), dp(12), dp(14));
-        card.addView(text(icon, 18, AppColors.GREEN, Typeface.BOLD));
+        card.addView(iconBadge(iconNameFor(icon + " " + title), AppColors.GREEN, 44), new LinearLayout.LayoutParams(dp(44), dp(44)));
         TextView label = text(title, 13, AppColors.GREEN_DARK, Typeface.BOLD);
         label.setGravity(Gravity.CENTER);
         card.addView(label);
@@ -194,8 +197,18 @@ public class Ui {
             item.setGravity(Gravity.CENTER_VERTICAL);
             item.setPadding(0, dp(10), 0, dp(10));
 
-            TextView leading = text(row[0], 12, AppColors.MUTED, Typeface.BOLD);
-            item.addView(leading, new LinearLayout.LayoutParams(dp(92), LinearLayout.LayoutParams.WRAP_CONTENT));
+            String status = row[row.length - 1];
+            int color = status.toLowerCase(Locale.ROOT).contains("warning") ? AppColors.RED : AppColors.GREEN;
+            LinearLayout leading = column();
+            leading.setGravity(Gravity.CENTER);
+            leading.addView(iconBadge(iconNameFor(row[0] + " " + row[1] + " " + status), color, 34), new LinearLayout.LayoutParams(dp(34), dp(34)));
+            String leadingText = row[0].trim();
+            if (!leadingText.isEmpty() && !"--".equals(leadingText) && !leadingText.matches("[A-Z]{1,3}|\\d+")) {
+                TextView leadingLabel = text(row[0], 9, AppColors.MUTED, Typeface.BOLD);
+                leadingLabel.setGravity(Gravity.CENTER);
+                leading.addView(leadingLabel);
+            }
+            item.addView(leading, new LinearLayout.LayoutParams(dp(76), LinearLayout.LayoutParams.WRAP_CONTENT));
 
             LinearLayout copy = column();
             copy.addView(text(row[1], 14, AppColors.INK, Typeface.BOLD));
@@ -204,8 +217,6 @@ public class Ui {
             }
             item.addView(copy, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
 
-            String status = row[row.length - 1];
-            int color = status.toLowerCase(Locale.ROOT).contains("warning") ? AppColors.RED : AppColors.GREEN;
             item.addView(pill(status, color));
             card.addView(item);
         }
@@ -217,20 +228,28 @@ public class Ui {
         card.setPadding(dp(16), dp(16), dp(16), dp(16));
         card.addView(text(title, 16, AppColors.INK, Typeface.BOLD));
         for (String[] row : rows) {
-            int value = Integer.parseInt(row[1]);
+            double value = safeChartValue(row[1]);
             LinearLayout line = row();
             line.setGravity(Gravity.CENTER_VERTICAL);
             line.setPadding(0, dp(8), 0, 0);
             line.addView(text(row[0], 12, AppColors.MUTED, Typeface.BOLD), new LinearLayout.LayoutParams(dp(58), LinearLayout.LayoutParams.WRAP_CONTENT));
             TextView bar = text("", 1, Color.WHITE, Typeface.NORMAL);
             bar.setBackground(round(AppColors.GREEN, dp(5), Color.TRANSPARENT, 0));
-            line.addView(bar, new LinearLayout.LayoutParams(Math.min(dp(190), Math.max(dp(42), dp(value / 20))), dp(10)));
+            line.addView(bar, new LinearLayout.LayoutParams(Math.min(dp(190), Math.max(dp(42), dp((int) Math.round(value / 20)))), dp(10)));
             TextView valueText = text(row[1], 12, AppColors.MUTED, Typeface.BOLD);
             valueText.setPadding(dp(8), 0, 0, 0);
             line.addView(valueText);
             card.addView(line);
         }
         return card;
+    }
+
+    private double safeChartValue(String value) {
+        try {
+            return Math.max(0, Double.parseDouble(String.valueOf(value).replace(",", "").trim()));
+        } catch (Exception ignored) {
+            return 0;
+        }
     }
 
     public View sparkline(int color) {
@@ -314,5 +333,38 @@ public class Ui {
             return String.format(Locale.US, "%,.0f", value);
         }
         return String.format(Locale.US, "%,.2f", value);
+    }
+
+    public View iconBadge(String name, int accent, int sizeDp) {
+        FrameLayout badge = new FrameLayout(activity);
+        badge.setPadding(dp(8), dp(8), dp(8), dp(8));
+        badge.setBackground(round(Color.argb(32, Color.red(accent), Color.green(accent), Color.blue(accent)), dp(Math.max(12, sizeDp / 3)), Color.TRANSPARENT, 0));
+        PaperIconView icon = new PaperIconView(activity, name, accent);
+        badge.addView(icon, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+        return badge;
+    }
+
+    public String iconNameFor(String label) {
+        String value = String.valueOf(label).toLowerCase(Locale.ROOT);
+        if (value.contains("dashboard") || value.contains("overview")) return "dashboard";
+        if (value.contains("process") || value.contains("progress") || value.contains("batch") || value.contains("shred") || value.contains("pulp")) return "process";
+        if (value.contains("iot") || value.contains("sensor") || value.contains("network") || value.contains("packet") || value.contains("sync") || value.contains("online")) return "iot";
+        if (value.contains("contributor") || value.contains("staff") || value.contains("user") || value.contains("active")) return "contributors";
+        if (value.contains("reward") || value.contains("point") || value.contains("gift") || value.contains("redeem")) return "rewards";
+        if (value.contains("report") || value.contains("data") || value.contains("export")) return "reports";
+        if (value.contains("history") || value.contains("time") || value.contains("runtime") || value.contains("session")) return "history";
+        if (value.contains("setting") || value.contains("security") || value.contains("rule")) return "settings";
+        if (value.contains("scan") || value.contains("qr") || value.contains("code")) return "scan";
+        if (value.contains("rain") || value.contains("water") || value.contains("flow") || value.contains("tds")) return "water";
+        if (value.contains("battery")) return "battery";
+        if (value.contains("power") || value.contains("energy")) return "power";
+        if (value.contains("paper") || value.contains("collection")) return "paper";
+        if (value.contains("briquette") || value.contains("brick") || value.contains("mold")) return "briquette";
+        if (value.contains("play") || value.contains("start")) return "play";
+        if (value.contains("stop")) return "stop";
+        if (value.contains("pause")) return "pause";
+        if (value.contains("check") || value.contains("completed") || value.contains("locked") || value.contains("safety") || value.contains("ok")) return "check";
+        if (value.contains("download")) return "export";
+        return "leaf";
     }
 }

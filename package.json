@@ -5,17 +5,35 @@
   "main": "backend/server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node backend/server.js",
+    "start": "npm run web:build && node backend/server.js",
     "dev": "node backend/server.js",
+    "web:dev": "vite --config frontend/web/vite.config.mjs",
+    "web:build": "vite build --config frontend/web/vite.config.mjs",
     "check": "node scripts/check.js",
-    "build": "node scripts/check.js",
-    "smoke:api": "node scripts/smoke-api.js"
+    "build": "npm run web:build && node scripts/check.js",
+    "db:migrate": "node scripts/migrate-mysql.js",
+    "smoke:api": "node scripts/smoke-api.js",
+    "android:bundled:sync": "node scripts/android-native.js sync",
+    "android:devices": "node scripts/android-native.js devices",
+    "android:reverse": "node scripts/android-native.js reverse",
+    "android:assemble": "node scripts/android-native.js assemble",
+    "android:install": "node scripts/android-native.js install",
+    "android:run": "node scripts/android-native.js run"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
     "mysql2": "^3.11.5",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1",
+    "vite": "^8.1.4"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3"
   }
 }

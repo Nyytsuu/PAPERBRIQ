@@ -6,6 +6,9 @@ import com.paperbriq.app.AppColors;
 import com.paperbriq.app.AppController;
 import com.paperbriq.app.ui.Ui;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public class ContributionsScreen implements AppScreen {
     @Override
     public String key() {
@@ -30,10 +33,20 @@ public class ContributionsScreen implements AppScreen {
     @Override
     public void render(LinearLayout root, AppController controller) {
         Ui ui = controller.ui();
+        JSONObject payload = controller.session().pagePayload("contributions");
+        JSONObject metrics = payload.optJSONObject("metrics");
+        if (metrics == null) metrics = new JSONObject();
+        JSONArray contributors = payload.optJSONArray("contributors");
+
         ui.addGrid(root, new android.view.View[]{
-            ui.statCard("Total Contributors", "15", "+3 from last week", AppColors.GREEN),
-            ui.statCard("Paper Donated", "45 kg", "+12 kg from last week", AppColors.BLUE),
-            ui.statCard("Briquettes Produced", "8 / 20", "40% of weekly target", AppColors.AMBER)
+            ui.statCard("Total Contributors", ui.formatNumber(metrics.optDouble("totalContributors", 0)), "From contributor records", AppColors.GREEN),
+            ui.statCard("Paper Donated", ui.formatNumber(metrics.optDouble("paperDonatedThisWeekKg", 0)) + " kg", "Collected in the last 7 days", AppColors.BLUE),
+            ui.statCard(
+                "Briquettes Produced",
+                ui.formatNumber(metrics.optDouble("briquettesProducedThisWeek", 0)) + " / " + ui.formatNumber(metrics.optDouble("weeklyTarget", 0)),
+                "From batch records",
+                AppColors.AMBER
+            )
         }, 1);
 
         root.addView(ui.sectionTitle("Search and Filters", ""));
@@ -41,30 +54,65 @@ public class ContributionsScreen implements AppScreen {
             ui.filterCard("Search", "Contributor, barangay, or scan ID"),
             ui.filterCard("Barangay", "All Barangays"),
             ui.filterCard("Status", "All Status"),
-            ui.filterCard("Date", "May 12 - May 18, 2026")
+            ui.filterCard("Date", "Live database records")
         }, 1);
 
         root.addView(ui.sectionTitle("Contributors", ""));
-        root.addView(ui.simpleList(new String[][]{
-            {"Juan", "Juan Dela Cruz", "San Isidro - 5.0 kg", "50 pts"},
-            {"Maria", "Maria Santos", "Newhope - 4.5 kg", "45 pts"},
-            {"Pedro", "Pedro Reyes", "San Isidro - 6.0 kg", "60 pts"},
-            {"Ana", "Ana Lopez", "Del Pilar - 3.0 kg", "30 pts"},
-            {"Mark", "Mark Villanueva", "Newhope - 2.5 kg", "25 pts"},
-            {"Liza", "Liza Garcia", "San Isidro - 4.0 kg", "40 pts"},
-            {"Ramon", "Ramon Bautista", "Del Pilar - 1.5 kg", "15 pts"},
-            {"Karla", "Karla Mendoza", "Newhope - 3.5 kg", "35 pts"},
-            {"Diego", "Diego Cruz", "San Isidro - 2.0 kg", "20 pts"},
-            {"Faith", "Faith Domingo", "Del Pilar - 4.5 kg", "45 pts"}
-        }));
+        root.addView(ui.simpleList(contributorRows(contributors, ui)));
 
         root.addView(ui.sectionTitle("Top Contributors This Week", "View All"));
-        ui.addGrid(root, new android.view.View[]{
-            ScreenPieces.contributorCard(ui, "1", "Pedro Reyes", "San Isidro", "6.0 kg", "60 pts"),
-            ScreenPieces.contributorCard(ui, "2", "Juan Dela Cruz", "San Isidro", "5.0 kg", "50 pts"),
-            ScreenPieces.contributorCard(ui, "3", "Maria Santos", "Newhope", "4.5 kg", "45 pts"),
-            ScreenPieces.contributorCard(ui, "4", "Faith Domingo", "Del Pilar", "4.5 kg", "45 pts"),
-            ScreenPieces.contributorCard(ui, "5", "Ana Lopez", "Del Pilar", "3.0 kg", "30 pts")
-        }, 1);
+        ui.addGrid(root, contributorCards(ui, contributors), 1);
+    }
+
+    private String[][] contributorRows(JSONArray contributors, Ui ui) {
+        if (contributors == null || contributors.length() == 0) {
+            return new String[][]{{"--", "No contributors in MySQL yet", "Waiting for collection records", "Empty"}};
+        }
+
+        int count = Math.min(contributors.length(), 10);
+        String[][] rows = new String[count][4];
+        for (int index = 0; index < count; index++) {
+            JSONObject contributor = contributors.optJSONObject(index);
+            if (contributor == null) contributor = new JSONObject();
+            String name = contributor.optString("name", "Contributor");
+            String barangay = contributor.optString("barangay", "Unassigned");
+            double paperKg = contributor.optDouble("paperDonatedKg", 0);
+            double points = contributor.optDouble("points", 0);
+            rows[index][0] = initials(name);
+            rows[index][1] = name;
+            rows[index][2] = barangay + " - " + ui.formatNumber(paperKg) + " kg - " + ui.formatNumber(points) + " pts";
+            rows[index][3] = contributor.optString("status", "Recorded");
+        }
+        return rows;
+    }
+
+    private android.view.View[] contributorCards(Ui ui, JSONArray contributors) {
+        if (contributors == null || contributors.length() == 0) {
+            return new android.view.View[]{ui.infoListCard("Top Contributors", new String[][]{{"Records", "No contributor totals yet"}})};
+        }
+
+        int count = Math.min(contributors.length(), 5);
+        android.view.View[] cards = new android.view.View[count];
+        for (int index = 0; index < count; index++) {
+            JSONObject contributor = contributors.optJSONObject(index);
+            if (contributor == null) contributor = new JSONObject();
+            cards[index] = ScreenPieces.contributorCard(
+                ui,
+                String.valueOf(index + 1),
+                contributor.optString("name", "Contributor"),
+                contributor.optString("barangay", "Unassigned"),
+                ui.formatNumber(contributor.optDouble("paperDonatedKg", 0)) + " kg",
+                ui.formatNumber(contributor.optDouble("points", 0)) + " pts"
+            );
+        }
+        return cards;
+    }
+
+    private String initials(String name) {
+        String[] parts = name.trim().split("\\s+");
+        if (parts.length == 0 || parts[0].isEmpty()) return "--";
+        String first = parts[0].substring(0, 1).toUpperCase();
+        if (parts.length == 1) return first;
+        return first + parts[parts.length - 1].substring(0, 1).toUpperCase();
     }
 }

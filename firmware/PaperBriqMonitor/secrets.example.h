@@ -1,0 +1,13 @@
+#pragma once
+
+#define HOME_WIFI_SSID "{PLDTHOMEFIBRdV4t5_2.4G"
+#define HOME_WIFI_PASSWORD "Yayiee22"
+#define HOME_SERVER_HOST "192.168.1.3"
+
+#define HOTSPOT_ONE_SSID "kezo"
+#define HOTSPOT_ONE_PASSWORD "passwordis12678"
+#define HOTSPOT_ONE_SERVER_HOST "192.168.1.3"
+
+#define HOTSPOT_TWO_SSID "Redmi 15"
+#define HOTSPOT_TWO_PASSWORD "danielle"
+#define HOTSPOT_TWO_SERVER_HOST "192.168.1.3"

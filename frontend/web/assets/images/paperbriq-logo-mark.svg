@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" role="img" aria-labelledby="title desc">
+  <title id="title">PaperBriq logo mark</title>
+  <desc id="desc">A green leaf and paper briquette stack inside a circular recycling mark.</desc>
+  <rect width="108" height="108" rx="24" fill="#E4ECB1"/>
+  <circle cx="54" cy="54" r="42" fill="#FAFCFD" opacity="0.72"/>
+  <path d="M28 64c-5-16 2-34 18-43" fill="none" stroke="#1B693C" stroke-width="7" stroke-linecap="round"/>
+  <path d="M30 64h-12l8 10z" fill="#1B693C"/>
+  <path d="M82 37c8 15 4 34-10 46" fill="none" stroke="#1B693C" stroke-width="7" stroke-linecap="round"/>
+  <path d="M83 37h12l-8-10z" fill="#1B693C"/>
+  <path d="M70 20c-23 2-37 15-40 36 21-1 37-14 40-36z" fill="#1B693C"/>
+  <path d="M36 53c11-10 20-18 30-28-5 13-14 23-30 28z" fill="#FAFCFD"/>
+  <path d="M78 33c16 4 23 15 19 31-14-4-22-15-19-31z" fill="#9BC43C"/>
+  <path d="M93 60c-5-9-9-16-13-25 8 7 13 15 13 25z" fill="#FAFCFD" opacity="0.9"/>
+  <rect x="28" y="68" width="15" height="9" rx="2" fill="#1B693C"/>
+  <rect x="47" y="68" width="15" height="9" rx="2" fill="#1B693C"/>
+  <rect x="66" y="68" width="15" height="9" rx="2" fill="#1B693C"/>
+  <rect x="37" y="81" width="15" height="9" rx="2" fill="#1B693C"/>
+  <rect x="56" y="81" width="15" height="9" rx="2" fill="#1B693C"/>
+</svg>

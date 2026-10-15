@@ -1,5 +1,8 @@
 <resources>
-    <color name="paperbriq_green">#0A7A32</color>
-    <color name="paperbriq_green_dark">#064B24</color>
-    <color name="paperbriq_background">#FBFDFB</color>
+    <color name="paperbriq_green">#56992F</color>
+    <color name="paperbriq_green_dark">#1B693C</color>
+    <color name="paperbriq_background">#FAFCFD</color>
+    <color name="paperbriq_highlight">#E4ECB1</color>
+    <color name="paperbriq_lime">#9BC43C</color>
+    <color name="paperbriq_teal">#115566</color>
 </resources>

@@ -7,5 +7,13 @@
   "theme_color": "#0b7a31",
   "orientation": "portrait",
   "description": "Paper waste collection and briquette production operations app.",
-  "categories": ["productivity", "utilities"]
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "assets/images/paperbriq-logo-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
 }

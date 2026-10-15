@@ -3,14 +3,10 @@ package com.paperbriq.app.screens;
 public final class ScreenRegistry {
     private static final AppScreen[] NAV_SCREENS = {
         new DashboardScreen(),
-        new ProcessTrackingScreen(),
         new IotMonitoringScreen(),
-        new ContributionsScreen(),
-        new RewardsScreen(),
+        new ProcessTrackingScreen(),
         new ReportsScreen(),
-        new HistoryScreen(),
-        new SettingsScreen(),
-        new ScanQrScreen()
+        new HistoryScreen()
     };
 
     private ScreenRegistry() {

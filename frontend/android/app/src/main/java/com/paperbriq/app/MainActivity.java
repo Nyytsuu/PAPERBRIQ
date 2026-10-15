@@ -14,7 +14,7 @@ public class MainActivity extends Activity {
         window.setStatusBarColor(AppColors.PAPER);
         window.setNavigationBarColor(AppColors.PAPER);
         controller = new AppController(this);
-        controller.showLogin();
+        controller.start();
     }
 
     @Override

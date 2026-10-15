@@ -5,6 +5,8 @@ const pageData = {
       message: "All PaperBriq systems are operating smoothly.",
       rainwaterLevel: 78,
       batteryLevel: 92,
+      temperatureC: 29.4,
+      humidityPercent: 65,
       powerOutputWatts: 240
     },
     processProgress: [
@@ -138,11 +140,11 @@ const pageData = {
       benefits: ["5% Bonus Points", "Priority in Rewards", "Exclusive PaperBriq Badges"]
     },
     rewards: [
-      { id: "voucher-100", name: "Eco Store Voucher P100", pointsCost: 100, category: "Vouchers" },
-      { id: "voucher-250", name: "Eco Store Voucher P250", pointsCost: 250, category: "Vouchers" },
-      { id: "tote-bag", name: "Eco Tote Bag", pointsCost: 300, category: "Eco Products" },
-      { id: "plant-tree", name: "Plant a Tree", pointsCost: 350, category: "Green Donations" },
-      { id: "water-bottle", name: "Eco Water Bottle", pointsCost: 400, category: "Eco Products" }
+      { id: "voucher-100", name: "Eco Store Voucher P100", pointsCost: 100, category: "Vouchers", description: "Local eco-store voucher for approved contributor claims.", stockQuantity: 18, imageUrl: "" },
+      { id: "voucher-250", name: "Eco Store Voucher P250", pointsCost: 250, category: "Vouchers", description: "Higher value eco-store voucher for regular recyclers.", stockQuantity: 10, imageUrl: "" },
+      { id: "tote-bag", name: "Eco Tote Bag", pointsCost: 300, category: "Eco Products", description: "Reusable PaperBriq tote bag.", stockQuantity: 24, imageUrl: "" },
+      { id: "plant-tree", name: "Plant a Tree", pointsCost: 350, category: "Green Donations", description: "Tree planting certificate sponsored by the barangay.", stockQuantity: 40, imageUrl: "" },
+      { id: "water-bottle", name: "Eco Water Bottle", pointsCost: 400, category: "Eco Products", description: "Reusable bottle for active contributors.", stockQuantity: 14, imageUrl: "" }
     ]
   },
   reports: {
@@ -181,6 +183,54 @@ const pageData = {
     ]
   },
   settings: {
+    userSettings: {
+      profile: {
+        fullName: "Juan Dela Cruz",
+        contactNumber: "+63 912 345 6789",
+        email: "juan@example.com",
+        barangay: "San Isidro",
+        address: "",
+        profilePicture: "Use initials"
+      },
+      qr: {
+        code: "PBQ-USER-juan-delacruz",
+        showForScanning: true,
+        allowDownload: true,
+        active: true
+      },
+      notifications: {
+        pointsEarned: true,
+        rewardRedeemed: true,
+        newRewardAvailable: true,
+        collectionSchedule: true,
+        impactUpdates: true,
+        weeklySummary: false
+      },
+      rewardPreferences: {
+        schoolSupplies: true,
+        ecoProducts: true,
+        vouchers: true,
+        foodPacks: false,
+        plantingActivities: true,
+        communityCertificates: true
+      },
+      contribution: {
+        defaultDropoff: "Barangay San Isidro",
+        collectionReminder: "Every Friday",
+        showHistory: true
+      },
+      privacy: {
+        showOnLeaderboard: true,
+        allowStaffQrProfile: true,
+        loginActivity: true
+      },
+      appPreferences: {
+        theme: "Light",
+        language: "English",
+        fontSize: "Medium",
+        dateFormat: "MM/DD/YYYY"
+      }
+    },
     profile: {
       fullName: "Juan Dela Cruz",
       email: "juan.delacruz@example.com",

@@ -8,3 +8,4 @@ package-lock.json
 frontend/android/.gradle/
 frontend/android/local.properties
 frontend/android/**/build/
+firmware/**/secrets.h

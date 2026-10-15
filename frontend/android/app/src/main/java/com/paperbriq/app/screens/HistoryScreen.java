@@ -6,6 +6,9 @@ import com.paperbriq.app.AppColors;
 import com.paperbriq.app.AppController;
 import com.paperbriq.app.ui.Ui;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public class HistoryScreen implements AppScreen {
     @Override
     public String key() {
@@ -14,48 +17,54 @@ public class HistoryScreen implements AppScreen {
 
     @Override
     public String navLabel() {
-        return "History";
+        return "Event History";
     }
 
     @Override
     public String title() {
-        return "History";
+        return "System History";
     }
 
     @Override
     public String subtitle() {
-        return "View past activities and system events.";
+        return "Review previous machine sessions, alerts, and system events.";
     }
 
     @Override
     public void render(LinearLayout root, AppController controller) {
         Ui ui = controller.ui();
+        JSONObject payload = controller.session().pagePayload("history");
+        JSONObject stats = payload.optJSONObject("stats");
+        if (stats == null) stats = new JSONObject();
+        JSONArray events = payload.optJSONArray("events");
+
         ui.addGrid(root, new android.view.View[]{
-            ui.statCard("Total Sessions", "78", "All time", AppColors.GREEN),
-            ui.statCard("Completed Runs", "64", "82% success rate", AppColors.GREEN),
-            ui.statCard("Total Runtime", "1 hr 20 mins", "All completed runs", AppColors.GREEN)
+            ui.statCard("Total Sessions", ui.formatNumber(stats.optDouble("totalSessions", 0)), "From process runs", AppColors.GREEN),
+            ui.statCard("Completed Runs", ui.formatNumber(stats.optDouble("completedRuns", 0)), stats.optString("successRate", "0%") + " success rate", AppColors.GREEN),
+            ui.statCard("Total Runtime", stats.optString("totalRuntime", "0 mins"), "All recorded runs", AppColors.GREEN)
         }, 1);
 
         root.addView(ui.sectionTitle("Recent Activities", "View All"));
-        root.addView(ui.simpleList(new String[][]{
-            {"Today", "System Check OK", "12:03 PM", "System"},
-            {"Today", "Pulping Mixture Began", "11:15 AM", "Process"},
-            {"Today", "Rainwater Added", "10:50 AM", "Resource"},
-            {"Today", "QR Code Scanned", "09:30 AM", "QR"}
-        }));
+        root.addView(ui.simpleList(eventRows(events, 4)));
 
         root.addView(ui.sectionTitle("All Events", ""));
-        root.addView(ui.simpleList(new String[][]{
-            {"12:03 PM", "System Check OK", "All systems are operating normally", "System"},
-            {"11:45 AM", "Paper Collection Completed", "Collected 45 kg / 60 kg", "Process Run"},
-            {"11:15 AM", "Pulping Mixture Began", "Pulping mixture process started", "Process Run"},
-            {"10:50 AM", "Rainwater Added", "Added 120 L of rainwater", "Resource"},
-            {"09:30 AM", "QR Code Scanned", "User: Juan Dela Cruz", "QR Scan"},
-            {"Yesterday", "Briquette Production Completed", "Produced 20 briquettes", "Process Run"},
-            {"Yesterday", "Maintenance Performed", "Cleaned shredder blades", "Maintenance"},
-            {"May 14", "Rainwater Added", "Added 100 L of rainwater", "Resource"},
-            {"May 14", "Shredding Completed", "Output: 78%", "Process Run"},
-            {"May 14", "Collect Paper Started", "Target: 60 kg", "Process Run"}
-        }));
+        root.addView(ui.simpleList(eventRows(events, 30)));
+    }
+
+    private String[][] eventRows(JSONArray events, int limit) {
+        if (events == null || events.length() == 0) {
+            return new String[][]{{"--", "No history events in MySQL yet", "Waiting for system events", "Empty"}};
+        }
+        int count = Math.min(events.length(), limit);
+        String[][] rows = new String[count][4];
+        for (int index = 0; index < count; index++) {
+            JSONObject event = events.optJSONObject(index);
+            if (event == null) event = new JSONObject();
+            rows[index][0] = event.optString("time", "--");
+            rows[index][1] = event.optString("title", "System event");
+            rows[index][2] = event.optString("description", "");
+            rows[index][3] = event.optString("category", "Event");
+        }
+        return rows;
     }
 }

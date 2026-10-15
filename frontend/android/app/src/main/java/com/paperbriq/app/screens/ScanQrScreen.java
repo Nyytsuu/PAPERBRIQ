@@ -11,6 +11,9 @@ import com.paperbriq.app.AppColors;
 import com.paperbriq.app.AppController;
 import com.paperbriq.app.ui.Ui;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public class ScanQrScreen implements AppScreen {
     @Override
     public String key() {
@@ -35,6 +38,12 @@ public class ScanQrScreen implements AppScreen {
     @Override
     public void render(LinearLayout root, AppController controller) {
         Ui ui = controller.ui();
+        JSONObject payload = controller.session().pagePayload("scan");
+        JSONObject scanStatus = payload.optJSONObject("scanStatus");
+        if (scanStatus == null) scanStatus = new JSONObject();
+        JSONObject contributor = payload.optJSONObject("contributor");
+        JSONArray recent = payload.optJSONArray("recent");
+
         root.addView(ui.sectionTitle("Scan Contributor QR Code", ""));
 
         LinearLayout scanner = ui.card(22);
@@ -46,15 +55,18 @@ public class ScanQrScreen implements AppScreen {
         TextView guide = ui.text("Align the contributor QR code within the frame.", 14, AppColors.MUTED, Typeface.BOLD);
         guide.setGravity(Gravity.CENTER);
         scanner.addView(guide);
+        android.widget.Button scanButton = ui.greenButton("Scan with Camera");
+        scanButton.setOnClickListener(v -> controller.startQrScanner());
+        scanner.addView(scanButton, ui.fullWidth(ui.dp(54), 0, ui.dp(14), 0, 0));
         root.addView(scanner, ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(12)));
 
         ui.addGrid(root, new android.view.View[]{
             ui.infoListCard("Scan Status", new String[][]{
-                {"Result", "Scan Successful"},
-                {"Contributor", "Verified"},
-                {"Record", "Data recorded"}
+                {"Result", scanStatus.optString("status", "waiting")},
+                {"Message", scanStatus.optString("message", "No QR scans recorded yet.")},
+                {"Source", "qr_scans table"}
             }),
-            contributorInfo(ui)
+            contributorInfo(ui, contributor)
         }, 1);
 
         root.addView(ui.sectionTitle("Enter Code Manually", ""));
@@ -62,39 +74,58 @@ public class ScanQrScreen implements AppScreen {
         manual.setGravity(Gravity.CENTER_VERTICAL);
         EditText code = ui.editText("Enter code here", false);
         manual.addView(code, new LinearLayout.LayoutParams(0, ui.dp(54), 1));
-        android.widget.Button submit = ui.greenButton("Submit");
-        submit.setOnClickListener(v -> Toast.makeText(controller.activity(), "Code submitted.", Toast.LENGTH_SHORT).show());
-        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(ui.dp(112), ui.dp(54));
+        android.widget.Button submit = ui.greenButton("Confirm");
+        submit.setOnClickListener(v -> controller.createManualQrScan(code.getText().toString()));
+        LinearLayout.LayoutParams submitParams = new LinearLayout.LayoutParams(ui.dp(126), ui.dp(54));
         submitParams.setMargins(ui.dp(10), 0, 0, 0);
         manual.addView(submit, submitParams);
         root.addView(manual, ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(12)));
 
         root.addView(ui.sectionTitle("Recent Scans", "View All"));
-        root.addView(ui.simpleList(new String[][]{
-            {"10:35 AM", "Maria Santos - San Isidro", "+15 pts"},
-            {"10:20 AM", "Pedro Dela Cruz - San Rafael", "+10 pts"},
-            {"10:05 AM", "Ana Reyes - San Isidro", "+18 pts"},
-            {"09:50 AM", "Luis Gonzales - San Roque", "+7 pts"},
-            {"09:35 AM", "Carmen Villanueva - San Isidro", "+12 pts"}
-        }));
+        root.addView(ui.simpleList(scanRows(recent, ui)));
     }
 
-    private android.view.View contributorInfo(Ui ui) {
+    private android.view.View contributorInfo(Ui ui, JSONObject contributor) {
         LinearLayout card = ui.card(18);
         card.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
         card.addView(ui.text("Contributor Information", 18, AppColors.INK, Typeface.BOLD));
-        card.addView(ui.text("Maria Santos", 20, AppColors.INK, Typeface.BOLD));
+        if (contributor == null) {
+            card.addView(ui.text("No scan selected", 20, AppColors.INK, Typeface.BOLD));
+            card.addView(ui.pill("Waiting", AppColors.MUTED));
+            card.addView(ui.infoRow("Database", "No QR scan records yet"));
+            return card;
+        }
+
+        card.addView(ui.text(contributor.optString("name", "Contributor"), 20, AppColors.INK, Typeface.BOLD));
         card.addView(ui.pill("Verified Contributor", AppColors.GREEN));
-        card.addView(ui.infoRow("Barangay", "San Isidro"));
-        card.addView(ui.infoRow("Member Since", "March 15, 2024"));
-        card.addView(ui.infoRow("Total Contributions", "12"));
+        card.addView(ui.infoRow("Barangay", contributor.optString("barangay", "Unassigned")));
+        card.addView(ui.infoRow("Member Since", contributor.optString("memberSince", "--")));
+        card.addView(ui.infoRow("Total Contributions", String.valueOf(contributor.optInt("totalContributions", 0))));
         LinearLayout earned = ui.card(16);
         earned.setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14));
         earned.setBackground(ui.round(AppColors.GREEN_SOFT, ui.dp(16), android.graphics.Color.TRANSPARENT, 0));
         earned.addView(ui.text("Points Earned", 16, AppColors.GREEN_DARK, Typeface.BOLD));
-        earned.addView(ui.text("+15 pts", 28, AppColors.GREEN, Typeface.BOLD));
+        earned.addView(ui.text("+" + contributor.optInt("pointsEarned", 0) + " pts", 28, AppColors.GREEN, Typeface.BOLD));
         earned.addView(ui.text("Thank you for recycling!", 13, AppColors.GREEN_DARK, Typeface.BOLD));
         card.addView(earned, ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, ui.dp(12), 0, 0));
         return card;
+    }
+
+    private String[][] scanRows(JSONArray recent, Ui ui) {
+        if (recent == null || recent.length() == 0) {
+            return new String[][]{{"--", "No QR scans in MySQL yet", "Use manual code or scanner", "Empty"}};
+        }
+
+        int count = Math.min(recent.length(), 8);
+        String[][] rows = new String[count][4];
+        for (int index = 0; index < count; index++) {
+            JSONObject scan = recent.optJSONObject(index);
+            if (scan == null) scan = new JSONObject();
+            rows[index][0] = scan.optString("time", "--");
+            rows[index][1] = scan.optString("contributor", "Contributor") + " - " + scan.optString("barangay", "Unassigned");
+            rows[index][2] = ui.formatNumber(scan.optDouble("weightKg", 0)) + " kg - +" + ui.formatNumber(scan.optDouble("points", 0)) + " pts";
+            rows[index][3] = scan.optString("status", "Recorded");
+        }
+        return rows;
     }
 }

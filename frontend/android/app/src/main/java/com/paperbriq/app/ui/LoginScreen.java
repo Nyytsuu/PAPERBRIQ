@@ -6,6 +6,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -18,7 +19,6 @@ import com.paperbriq.app.AppController;
 import com.paperbriq.app.R;
 
 public class LoginScreen {
-    private String selectedRole = "admin";
     private boolean passwordVisible = false;
 
     public View create(AppController controller) {
@@ -58,7 +58,7 @@ public class LoginScreen {
         LinearLayout copy = ui.column();
         copy.setPadding(ui.dp(14), 0, 0, 0);
         copy.addView(ui.text("PAPERBRIQ", 38, AppColors.GREEN_DARK, Typeface.BOLD));
-        copy.addView(ui.text("Paper waste to stronger briquettes", 14, AppColors.GREEN, Typeface.BOLD));
+        copy.addView(ui.text("LIVE MONITORING SYSTEM", 13, AppColors.GREEN, Typeface.BOLD));
         lockup.addView(copy, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         hero.addView(lockup, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         return hero;
@@ -75,31 +75,32 @@ public class LoginScreen {
         heading.addView(ui.brandMark(42, 13), new LinearLayout.LayoutParams(ui.dp(42), ui.dp(42)));
         LinearLayout headingText = ui.column();
         headingText.setPadding(ui.dp(12), 0, 0, 0);
-        headingText.addView(ui.text("Welcome Back!", 23, AppColors.INK, Typeface.BOLD));
-        headingText.addView(ui.text("Sign in to your PaperBriq account", 14, AppColors.MUTED, Typeface.NORMAL));
+        headingText.addView(ui.text("Monitor PaperBriq", 23, AppColors.INK, Typeface.BOLD));
+        headingText.addView(ui.text("Sign in for live machine and production data", 14, AppColors.MUTED, Typeface.NORMAL));
         heading.addView(headingText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         card.addView(heading);
 
         EditText emailInput = ui.editText("Enter your email address", false);
         EditText passwordInput = ui.editText("Enter your password", true);
+        CheckBox keepLoggedIn = new CheckBox(controller.activity());
+        keepLoggedIn.setText("Keep me logged in");
+        keepLoggedIn.setTextColor(AppColors.MUTED);
+        keepLoggedIn.setTextSize(14);
+        keepLoggedIn.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        keepLoggedIn.setButtonTintList(android.content.res.ColorStateList.valueOf(AppColors.GREEN));
+
         card.addView(field(ui, "Email Address", emailInput));
         card.addView(passwordField(ui, passwordInput));
 
-        TextView roleTitle = ui.text("Select Your Role", 15, AppColors.INK, Typeface.BOLD);
-        roleTitle.setPadding(0, ui.dp(18), 0, ui.dp(10));
-        card.addView(roleTitle);
-
-        LinearLayout roleRow = ui.row();
-        roleRow.addView(roleCard(ui, "admin", "Admin", "A"));
-        roleRow.addView(roleCard(ui, "barangay_staff", "Barangay Staff", "B"));
-        roleRow.addView(roleCard(ui, "contributor", "Contributor", "C"));
-        card.addView(roleRow);
-        refreshRoles(ui, roleRow);
-
         LinearLayout options = ui.row();
+        options.setGravity(Gravity.CENTER_VERTICAL);
         options.setPadding(0, ui.dp(18), 0, ui.dp(18));
-        options.addView(ui.text("Remember Me", 14, AppColors.MUTED, Typeface.BOLD), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        options.addView(ui.text("Forgot Password?", 14, AppColors.GREEN, Typeface.BOLD));
+        options.addView(keepLoggedIn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        TextView forgotPassword = ui.text("Forgot Password?", 14, AppColors.GREEN, Typeface.BOLD);
+        forgotPassword.setGravity(Gravity.RIGHT);
+        forgotPassword.setClickable(true);
+        forgotPassword.setOnClickListener(v -> controller.showForgotPasswordDialog(emailInput.getText().toString(), "contributor"));
+        options.addView(forgotPassword, new LinearLayout.LayoutParams(ui.dp(132), LinearLayout.LayoutParams.WRAP_CONTENT));
         card.addView(options);
 
         TextView messageView = ui.text("", 13, AppColors.RED, Typeface.BOLD);
@@ -109,26 +110,12 @@ public class LoginScreen {
         loginButton.setOnClickListener(v -> controller.login(
             emailInput.getText().toString(),
             passwordInput.getText().toString(),
-            selectedRole,
+            "contributor",
+            keepLoggedIn.isChecked(),
             loginButton,
             messageView
         ));
         card.addView(loginButton, ui.fullWidth(ui.dp(58), 0, 0, 0, 0));
-
-        TextView divider = ui.text("or continue with", 13, AppColors.MUTED, Typeface.NORMAL);
-        divider.setGravity(Gravity.CENTER);
-        divider.setPadding(0, ui.dp(18), 0, ui.dp(12));
-        card.addView(divider);
-
-        Button google = ui.outlineButton("Sign in with Google");
-        google.setOnClickListener(v -> messageView.setText("Google sign-in can be connected after OAuth setup."));
-        card.addView(google, ui.fullWidth(ui.dp(54), 0, 0, 0, 0));
-
-        TextView request = ui.text("Don't have an account? Request access", 14, AppColors.GREEN, Typeface.BOLD);
-        request.setGravity(Gravity.CENTER);
-        request.setPadding(0, ui.dp(18), 0, 0);
-        request.setOnClickListener(v -> controller.showAccessDialog(selectedRole));
-        card.addView(request);
 
         messageView.setPadding(0, ui.dp(12), 0, 0);
         card.addView(messageView);
@@ -172,54 +159,4 @@ public class LoginScreen {
         return group;
     }
 
-    private LinearLayout roleCard(Ui ui, String role, String label, String icon) {
-        LinearLayout card = ui.column();
-        card.setGravity(Gravity.CENTER);
-        card.setPadding(ui.dp(7), ui.dp(12), ui.dp(7), ui.dp(10));
-        card.setTag(role);
-        card.setOnClickListener(v -> {
-            selectedRole = role;
-            refreshRoles(ui, (LinearLayout) card.getParent());
-        });
-        TextView iconView = ui.text(icon, 19, AppColors.GREEN, Typeface.BOLD);
-        iconView.setGravity(Gravity.CENTER);
-        iconView.setBackground(ui.round(AppColors.GREEN_SOFT, ui.dp(18), Color.TRANSPARENT, 0));
-        card.addView(iconView, new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
-        TextView labelView = ui.text(label, 12, AppColors.INK, Typeface.BOLD);
-        labelView.setGravity(Gravity.CENTER);
-        labelView.setPadding(0, ui.dp(7), 0, ui.dp(8));
-        card.addView(labelView);
-        TextView dot = ui.text("", 1, AppColors.GREEN, Typeface.NORMAL);
-        dot.setGravity(Gravity.CENTER);
-        dot.setTag("dot");
-        card.addView(dot, new LinearLayout.LayoutParams(ui.dp(24), ui.dp(24)));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ui.dp(126), 1);
-        params.setMargins(ui.dp(4), 0, ui.dp(4), 0);
-        card.setLayoutParams(params);
-        return card;
-    }
-
-    private void refreshRoles(Ui ui, LinearLayout roleRow) {
-        for (int i = 0; i < roleRow.getChildCount(); i++) {
-            LinearLayout roleCard = (LinearLayout) roleRow.getChildAt(i);
-            boolean selected = selectedRole.equals(roleCard.getTag());
-            roleCard.setBackground(ui.round(selected ? Color.rgb(242, 251, 244) : Color.WHITE, ui.dp(14), selected ? AppColors.GREEN : AppColors.LINE, selected ? 2 : 1));
-            TextView dot = findTaggedText(roleCard, "dot");
-            if (dot != null) {
-                dot.setText(selected ? "o" : "");
-                dot.setTextColor(selected ? AppColors.GREEN : AppColors.LINE);
-                dot.setBackground(ui.round(Color.WHITE, ui.dp(12), selected ? AppColors.GREEN : Color.rgb(200, 208, 217), 2));
-            }
-        }
-    }
-
-    private TextView findTaggedText(LinearLayout parent, String tag) {
-        for (int i = 0; i < parent.getChildCount(); i++) {
-            View child = parent.getChildAt(i);
-            if (tag.equals(child.getTag()) && child instanceof TextView) {
-                return (TextView) child;
-            }
-        }
-        return null;
-    }
 }

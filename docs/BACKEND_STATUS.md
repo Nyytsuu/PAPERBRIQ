@@ -11,6 +11,9 @@ The smoke test starts the API on a temporary localhost port, checks the web entr
 
 - `GET /api/health`
 - `POST /api/auth/login`
+- `POST /api/auth/signup`
+- `GET /api/staff-accounts?creatorRole=admin`
+- `POST /api/staff-accounts`
 - `GET /api/summary`
 - `GET /api/dashboard`
 - `GET /api/process`
@@ -41,4 +44,6 @@ Important:
 
 - Re-run/import `database/mysql/mysql_schema.sql` in MySQL Workbench to create the new backend tables.
 - Routes return fallback demo payloads if a newer table is missing, so the API can still respond during setup.
-- Android currently uses the backend for login/access requests. `ApiClient.getJson()` is ready for wiring the pages to these new endpoints.
+- Web login supports Admin, Barangay Staff, and User roles from one login screen.
+- Admin web users can create Barangay Staff accounts through `POST /api/staff-accounts`.
+- Android currently uses the backend for user login and signup, and stays contributor-focused for the mobile/QR flow.

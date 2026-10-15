@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   role ENUM('admin', 'barangay_staff', 'contributor') NOT NULL,
   password_hash CHAR(64) NOT NULL,
   barangay VARCHAR(120),
+  profile_image_url MEDIUMTEXT,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -232,6 +233,12 @@ CREATE TABLE IF NOT EXISTS rewards (
   reward_name VARCHAR(160) NOT NULL,
   points_cost INT NOT NULL,
   category VARCHAR(80) NOT NULL,
+  reward_image_url MEDIUMTEXT,
+  description TEXT,
+  stock_quantity INT NOT NULL DEFAULT 0,
+  created_by_role VARCHAR(40),
+  created_by_name VARCHAR(180),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   is_active BOOLEAN NOT NULL DEFAULT TRUE
 ) ENGINE=InnoDB;
 
@@ -395,6 +402,15 @@ INSERT INTO app_settings (settings_key, settings_json)
 VALUES (
   'default',
   JSON_OBJECT(
+    'userSettings', JSON_OBJECT(
+      'profile', JSON_OBJECT('fullName', 'Juan Dela Cruz', 'contactNumber', '+63 912 345 6789', 'email', 'juan@example.com', 'barangay', 'San Isidro', 'address', '', 'profilePicture', 'Use initials'),
+      'qr', JSON_OBJECT('code', 'PBQ-USER-juan-delacruz', 'showForScanning', true, 'allowDownload', true, 'active', true),
+      'notifications', JSON_OBJECT('pointsEarned', true, 'rewardRedeemed', true, 'newRewardAvailable', true, 'collectionSchedule', true, 'impactUpdates', true, 'weeklySummary', false),
+      'rewardPreferences', JSON_OBJECT('schoolSupplies', true, 'ecoProducts', true, 'vouchers', true, 'foodPacks', false, 'plantingActivities', true, 'communityCertificates', true),
+      'contribution', JSON_OBJECT('defaultDropoff', 'Barangay San Isidro', 'collectionReminder', 'Every Friday', 'showHistory', true),
+      'privacy', JSON_OBJECT('showOnLeaderboard', true, 'allowStaffQrProfile', true, 'loginActivity', true),
+      'appPreferences', JSON_OBJECT('theme', 'Light', 'language', 'English', 'fontSize', 'Medium', 'dateFormat', 'MM/DD/YYYY')
+    ),
     'profile', JSON_OBJECT('fullName', 'Juan Dela Cruz', 'email', 'juan.delacruz@example.com', 'phone', '+63 912 345 6789', 'role', 'Contributor'),
     'account', JSON_OBJECT('username', 'juan.delacruz', 'accountType', 'Contributor', 'memberSince', 'May 15, 2024', 'timeZone', '(GMT+8) Asia/Manila'),
     'machine', JSON_OBJECT('defaultBriquetteSize', 'Standard (42x22 cm)', 'autoStartMachine', true, 'shredLevel', 'Medium', 'dryingTemperature', '55 C'),

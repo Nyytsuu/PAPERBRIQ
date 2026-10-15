@@ -1,7 +1,7 @@
 const ROLE_LABELS = {
   admin: "Admin",
   barangay_staff: "Barangay Staff",
-  contributor: "Contributor"
+  contributor: "User"
 };
 
 function normalizeRole(value) {
