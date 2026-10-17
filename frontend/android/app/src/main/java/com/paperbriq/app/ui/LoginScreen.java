@@ -110,7 +110,7 @@ public class LoginScreen {
         loginButton.setOnClickListener(v -> controller.login(
             emailInput.getText().toString(),
             passwordInput.getText().toString(),
-            "contributor",
+            "",
             keepLoggedIn.isChecked(),
             loginButton,
             messageView

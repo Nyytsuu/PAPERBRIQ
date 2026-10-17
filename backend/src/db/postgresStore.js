@@ -40,15 +40,16 @@ function createPostgresStore(databaseUrl) {
       await pool.end();
     },
     async login(email, password, role) {
+      const roleFilter = role || "";
       const result = await pool.query(
         `SELECT id, full_name, email, role, barangay
          FROM app_users
          WHERE LOWER(email) = $1
-           AND role = $2::user_role
+           AND ($2 = '' OR role::text = $2)
            AND is_active = TRUE
            AND password_hash = crypt($3, password_hash)
          LIMIT 1`,
-        [email, role, password]
+        [email, roleFilter, password]
       );
 
       if (!result.rowCount) return null;

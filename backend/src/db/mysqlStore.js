@@ -41,15 +41,16 @@ function createMysqlStore(databaseUrl) {
     },
     async login(email, password, role) {
       await ensureUserProfileColumns(pool);
+      const roleFilter = role || "";
       const [rows] = await pool.execute(
         `SELECT id, full_name, email, role, barangay, profile_image_url
          FROM app_users
          WHERE LOWER(email) = ?
-           AND role = ?
+           AND (? = '' OR role = ?)
            AND is_active = TRUE
            AND password_hash = SHA2(?, 256)
          LIMIT 1`,
-        [email, role, password]
+        [email, roleFilter, roleFilter, password]
       );
 
       if (!rows.length) return null;

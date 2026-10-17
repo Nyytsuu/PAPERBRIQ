@@ -249,7 +249,9 @@ public class AppController {
                 JSONObject payload = new JSONObject();
                 payload.put("email", email.trim());
                 payload.put("password", password);
-                payload.put("role", role);
+                if (role != null && !role.trim().isEmpty()) {
+                    payload.put("role", role);
+                }
                 JSONObject response = apiClient.postJson("/api/auth/login", payload);
                 session.user = response.optJSONObject("user");
                 session.summary = response.optJSONObject("summary");

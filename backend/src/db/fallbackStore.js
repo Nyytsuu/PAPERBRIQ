@@ -40,7 +40,7 @@ function createFallbackStore() {
       const user = fallbackUsers.find((candidate) => (
         candidate.email === email &&
         candidate.password === password &&
-        candidate.role === role
+        (!role || candidate.role === role)
       ));
 
       if (!user) return null;

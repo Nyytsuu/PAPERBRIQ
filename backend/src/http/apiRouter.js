@@ -158,10 +158,15 @@ async function routeApi(req, res, requestUrl) {
     const body = await readJson(req);
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
-    const role = normalizeRole(body.role);
+    const requestedRole = String(body.role || "").trim();
+    const role = requestedRole ? normalizeRole(requestedRole) : null;
 
-    if (!email || !password || !role) {
-      sendJson(res, 400, { error: "Email, password, and role are required." });
+    if (!email || !password) {
+      sendJson(res, 400, { error: "Email and password are required." });
+      return;
+    }
+    if (requestedRole && !role) {
+      sendJson(res, 400, { error: "A valid role is required when a role is supplied." });
       return;
     }
 
