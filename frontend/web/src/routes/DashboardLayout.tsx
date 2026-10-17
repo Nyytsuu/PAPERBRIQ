@@ -109,7 +109,7 @@ export default function DashboardLayout({ user, summary, onLogout, onUserUpdate 
           <img src="/assets/images/paperbriq-logo-mark.svg" alt="" aria-hidden="true" />
           <div>
             <strong>PAPERBRIQ</strong>
-            <span>Monitoring System</span>
+            <span>Monitoring &amp; Control</span>
           </div>
         </button>
 
@@ -180,7 +180,7 @@ export default function DashboardLayout({ user, summary, onLogout, onUserUpdate 
             <div className="topbar-mini" aria-label="Workspace summary">
               <span><strong>{liveDashboard?.displayTime || "Live"}</strong><small>last sync</small></span>
               <span><strong>MySQL</strong><small>data mode</small></span>
-              <span><strong>Read only</strong><small>monitoring mode</small></span>
+              <span><strong>Operator</strong><small>monitor &amp; control</small></span>
             </div>
           </div>
           <aside className="topbar-panel" aria-label="Live workspace status">

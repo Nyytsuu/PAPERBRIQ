@@ -5,7 +5,10 @@ function readJson(req) {
       data += chunk;
       if (data.length > 1_000_000) {
         req.destroy();
-        reject(new Error("Request body too large"));
+        const error = new Error("Request body too large");
+        error.statusCode = 413;
+        error.publicMessage = "Request body is too large.";
+        reject(error);
       }
     });
     req.on("end", () => {
@@ -16,7 +19,10 @@ function readJson(req) {
       try {
         resolve(JSON.parse(data));
       } catch (error) {
-        reject(new Error("Invalid JSON body"));
+        const parseError = new Error("Invalid JSON body");
+        parseError.statusCode = 400;
+        parseError.publicMessage = "Request body must be valid JSON.";
+        reject(parseError);
       }
     });
   });

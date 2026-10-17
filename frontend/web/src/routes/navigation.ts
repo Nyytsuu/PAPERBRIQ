@@ -6,7 +6,7 @@ export const roleLabels = {
 export const sectionCopy = {
   overview: {
     title: "Monitoring Overview",
-    subtitle: "A live, read-only view of production, collection, and machine health."
+    subtitle: "A live view of production, collection, and machine health."
   },
   reports: {
     title: "Performance History",
@@ -14,6 +14,6 @@ export const sectionCopy = {
   },
   iot: {
     title: "Live Telemetry",
-    subtitle: "Real-time sensor readings, device states, alerts, and diagnostics."
+    subtitle: "Real-time sensors, device states, alerts, diagnostics, and authorized controls."
   }
 };

@@ -5,8 +5,33 @@ const { createLiveDashboardSnapshot, createLiveSummarySnapshot } = require("../d
 const { createLiveIotSnapshot } = require("../data/liveIot");
 const { createLiveReportsSnapshot } = require("../data/liveReports");
 const { pageData } = require("../data/pageData");
+const {
+  canAcknowledge,
+  inferProcessState,
+  mapDeviceCommand,
+  mapDeviceEvent,
+  publicStoreError
+} = require("./deviceControl");
 
 function createFallbackStore() {
+  const deviceCommands = [];
+  const deviceEvents = [];
+  const devicePresence = new Map();
+
+  function touchDevice(deviceId) {
+    devicePresence.set(deviceId, new Date().toISOString());
+  }
+
+  function expireCommands(now = new Date()) {
+    for (const command of deviceCommands) {
+      if (command.status === "queued" && new Date(command.expiresAt) <= now) {
+        command.status = "expired";
+        command.completedAt = now.toISOString();
+        command.message = command.message || "Command expired before device acknowledgement.";
+      }
+    }
+  }
+
   return {
     mode: "demo memory",
     configured: false,
@@ -133,10 +158,10 @@ function createFallbackStore() {
       return createLiveSummarySnapshot(fallbackSummary);
     },
     async getDashboard() {
-      return createLiveDashboardSnapshot(pageData.dashboard, createLiveSummarySnapshot(fallbackSummary));
+      return createLiveDashboardSnapshot(pageData.dashboard, createLiveSummarySnapshot(fallbackSummary), pageData.iot);
     },
     async getProcess() {
-      const dashboard = createLiveDashboardSnapshot(pageData.dashboard, createLiveSummarySnapshot(fallbackSummary));
+      const dashboard = createLiveDashboardSnapshot(pageData.dashboard, createLiveSummarySnapshot(fallbackSummary), pageData.iot);
 
       return {
         ...pageData.process,
@@ -165,6 +190,119 @@ function createFallbackStore() {
         action: action.action || "start",
         status: "accepted",
         created_at: new Date().toISOString()
+      };
+    },
+    async createDeviceCommand(input) {
+      expireCommands();
+      if (input.idempotencyKey) {
+        const existing = deviceCommands.find((command) => (
+          command.deviceId === input.deviceId && command.idempotencyKey === input.idempotencyKey
+        ));
+        if (existing) return mapDeviceCommand(existing);
+      }
+
+      const createdAt = new Date();
+      const command = {
+        id: randomUUID(),
+        deviceId: input.deviceId,
+        command: input.command,
+        status: "queued",
+        idempotencyKey: input.idempotencyKey || null,
+        createdAt: createdAt.toISOString(),
+        expiresAt: new Date(createdAt.getTime() + input.ttlSeconds * 1000).toISOString(),
+        deliveredAt: null,
+        completedAt: null,
+        message: ""
+      };
+      if (input.command === "stop") {
+        for (const pending of deviceCommands) {
+          if (pending.deviceId === input.deviceId && pending.status === "queued") {
+            pending.status = "expired";
+            pending.completedAt = createdAt.toISOString();
+            pending.message = "Superseded by a newer stop command.";
+          }
+        }
+      }
+      deviceCommands.unshift(command);
+      return mapDeviceCommand(command);
+    },
+    async getNextDeviceCommand(deviceId) {
+      const now = new Date();
+      touchDevice(deviceId);
+      expireCommands(now);
+      const command = [...deviceCommands]
+        .reverse()
+        .find((candidate) => candidate.deviceId === deviceId && candidate.status === "queued");
+      return mapDeviceCommand(command);
+    },
+    async acknowledgeDeviceCommand(id, acknowledgement) {
+      const now = new Date();
+      touchDevice(acknowledgement.deviceId);
+      expireCommands(now);
+      const command = deviceCommands.find((candidate) => (
+        candidate.id === id && candidate.deviceId === acknowledgement.deviceId
+      ));
+      if (!command) throw publicStoreError(404, "Device command not found.");
+      if (!canAcknowledge(command.status, acknowledgement.status)) {
+        throw publicStoreError(409, `Command cannot move from ${command.status} to ${acknowledgement.status}.`);
+      }
+      if (command.status === acknowledgement.status) return mapDeviceCommand(command);
+
+      command.status = acknowledgement.status;
+      command.message = acknowledgement.message || command.message;
+      if (acknowledgement.status === "delivered") command.deliveredAt = now.toISOString();
+      if (["completed", "failed"].includes(acknowledgement.status)) {
+        command.deliveredAt ||= now.toISOString();
+        command.completedAt = now.toISOString();
+      }
+      return mapDeviceCommand(command);
+    },
+    async recordDeviceEvent(input) {
+      touchDevice(input.deviceId);
+      if (input.eventKey) {
+        const existing = deviceEvents.find((event) => (
+          event.deviceId === input.deviceId && event.eventKey === input.eventKey
+        ));
+        if (existing) return mapDeviceEvent(existing);
+      }
+
+      const event = {
+        id: randomUUID(),
+        deviceId: input.deviceId,
+        eventKey: input.eventKey || null,
+        type: input.type,
+        severity: input.severity,
+        component: input.component,
+        message: input.message,
+        processState: input.processState || null,
+        commandId: input.commandId || null,
+        metadata: input.metadata || {},
+        createdAt: new Date().toISOString()
+      };
+      deviceEvents.unshift(event);
+      return mapDeviceEvent(event);
+    },
+    async getDeviceControlStatus(deviceId, onlineAfter) {
+      expireCommands();
+      const commands = deviceCommands
+        .filter((command) => command.deviceId === deviceId)
+        .slice(0, 12)
+        .map(mapDeviceCommand);
+      const events = deviceEvents
+        .filter((event) => event.deviceId === deviceId)
+        .slice(0, 20)
+        .map(mapDeviceEvent);
+      const lastSeenAt = devicePresence.get(deviceId) || null;
+      return {
+        deviceId,
+        processState: inferProcessState(events, commands),
+        device: {
+          connected: Boolean(lastSeenAt && new Date(lastSeenAt) >= onlineAfter),
+          lastSeenAt,
+          lastEventAt: events[0]?.createdAt || null
+        },
+        commands,
+        events
       };
     },
     async getIotMonitoring() {

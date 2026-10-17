@@ -1,6 +1,13 @@
 const { randomUUID } = require("crypto");
 const { ROLE_LABELS } = require("../config/roles");
 const { parseMysqlDatabaseUrl } = require("../config/database");
+const {
+  canAcknowledge,
+  inferProcessState,
+  mapDeviceCommand,
+  mapDeviceEvent,
+  publicStoreError
+} = require("./deviceControl");
 
 function loadMysql() {
   try {
@@ -15,6 +22,16 @@ function createMysqlStore(databaseUrl) {
   if (!mysql || !databaseUrl) return null;
 
   const pool = mysql.createPool(parseMysqlDatabaseUrl(databaseUrl));
+  let deviceControlSchemaPromise;
+  const ensureControlSchema = () => {
+    if (!deviceControlSchemaPromise) {
+      deviceControlSchemaPromise = ensureDeviceControlSchema(pool).catch((error) => {
+        deviceControlSchemaPromise = null;
+        throw error;
+      });
+    }
+    return deviceControlSchemaPromise;
+  };
 
   return {
     mode: "MySQL",
@@ -258,6 +275,201 @@ function createMysqlStore(databaseUrl) {
         action: action.action || "start",
         status: "accepted",
         created_at: new Date().toISOString()
+      };
+    },
+    async createDeviceCommand(input) {
+      await ensureControlSchema();
+      const id = randomUUID();
+      const createdAt = new Date();
+      const expiresAt = new Date(createdAt.getTime() + input.ttlSeconds * 1000);
+
+      try {
+        await pool.execute(
+          `INSERT INTO device_commands
+             (id, device_id, command, status, idempotency_key, message, created_at, expires_at, updated_at)
+           VALUES (?, ?, ?, 'queued', ?, '', ?, ?, ?)`,
+          [id, input.deviceId, input.command, input.idempotencyKey || null, createdAt, expiresAt, createdAt]
+        );
+      } catch (error) {
+        if (error?.code !== "ER_DUP_ENTRY" || !input.idempotencyKey) throw error;
+        const [existing] = await pool.execute(
+          `SELECT id, device_id, command, status, message, created_at, expires_at,
+                  delivered_at, completed_at
+           FROM device_commands
+           WHERE device_id = ? AND idempotency_key = ?
+           LIMIT 1`,
+          [input.deviceId, input.idempotencyKey]
+        );
+        if (existing[0]) return mapDeviceCommand(existing[0]);
+        throw error;
+      }
+
+      return mapDeviceCommand({
+        id,
+        deviceId: input.deviceId,
+        command: input.command,
+        status: "queued",
+        message: "",
+        createdAt,
+        expiresAt,
+        deliveredAt: null,
+        completedAt: null
+      });
+    },
+    async getNextDeviceCommand(deviceId) {
+      await ensureControlSchema();
+      const now = new Date();
+      await expireMysqlCommands(pool, now);
+      await touchMysqlDevice(pool, deviceId, now);
+      const [rows] = await pool.execute(
+        `SELECT id, device_id, command, status, message, created_at, expires_at,
+                delivered_at, completed_at
+         FROM device_commands
+         WHERE device_id = ? AND status = 'queued'
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`,
+        [deviceId]
+      );
+      return mapDeviceCommand(rows[0]);
+    },
+    async acknowledgeDeviceCommand(id, acknowledgement) {
+      await ensureControlSchema();
+      const connection = await pool.getConnection();
+      const now = new Date();
+      try {
+        await connection.beginTransaction();
+        await expireMysqlCommands(connection, now);
+        await touchMysqlDevice(connection, acknowledgement.deviceId, now);
+        const [rows] = await connection.execute(
+          `SELECT id, device_id, command, status, message, created_at, expires_at,
+                  delivered_at, completed_at
+           FROM device_commands
+           WHERE id = ? AND device_id = ?
+           FOR UPDATE`,
+          [id, acknowledgement.deviceId]
+        );
+        const current = rows[0];
+        if (!current) throw publicStoreError(404, "Device command not found.");
+        if (!canAcknowledge(current.status, acknowledgement.status)) {
+          throw publicStoreError(409, `Command cannot move from ${current.status} to ${acknowledgement.status}.`);
+        }
+        if (current.status !== acknowledgement.status) {
+          const deliveredAt = acknowledgement.status === "delivered"
+            ? now
+            : (["completed", "failed"].includes(acknowledgement.status) ? (current.delivered_at || now) : current.delivered_at);
+          const completedAt = ["completed", "failed"].includes(acknowledgement.status) ? now : current.completed_at;
+          await connection.execute(
+            `UPDATE device_commands
+             SET status = ?, message = ?, delivered_at = ?, completed_at = ?, updated_at = ?
+             WHERE id = ?`,
+            [
+              acknowledgement.status,
+              acknowledgement.message || current.message || "",
+              deliveredAt,
+              completedAt,
+              now,
+              id
+            ]
+          );
+          Object.assign(current, {
+            status: acknowledgement.status,
+            message: acknowledgement.message || current.message || "",
+            delivered_at: deliveredAt,
+            completed_at: completedAt
+          });
+        }
+        await connection.commit();
+        return mapDeviceCommand(current);
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
+    async recordDeviceEvent(input) {
+      await ensureControlSchema();
+      const id = randomUUID();
+      const now = new Date();
+      await touchMysqlDevice(pool, input.deviceId, now);
+      try {
+        await pool.execute(
+          `INSERT INTO device_events
+             (id, device_id, event_key, event_type, severity, component, message,
+              process_state, command_id, metadata, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            id,
+            input.deviceId,
+            input.eventKey || null,
+            input.type,
+            input.severity,
+            input.component,
+            input.message,
+            input.processState || null,
+            input.commandId || null,
+            JSON.stringify(input.metadata || {}),
+            now
+          ]
+        );
+      } catch (error) {
+        if (error?.code !== "ER_DUP_ENTRY" || !input.eventKey) throw error;
+        const [existing] = await pool.execute(
+          `SELECT id, device_id, event_type, severity, component, message,
+                  process_state, command_id, metadata, created_at
+           FROM device_events
+           WHERE device_id = ? AND event_key = ?
+           LIMIT 1`,
+          [input.deviceId, input.eventKey]
+        );
+        if (existing[0]) return mapDeviceEvent(existing[0]);
+        throw error;
+      }
+      return mapDeviceEvent({ ...input, id, createdAt: now });
+    },
+    async getDeviceControlStatus(deviceId, onlineAfter) {
+      await ensureControlSchema();
+      await expireMysqlCommands(pool, new Date());
+      const [[commandRows], [eventRows], [presenceRows]] = await Promise.all([
+        pool.execute(
+          `SELECT id, device_id, command, status, message, created_at, expires_at,
+                  delivered_at, completed_at
+           FROM device_commands
+           WHERE device_id = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT 12`,
+          [deviceId]
+        ),
+        pool.execute(
+          `SELECT id, device_id, event_type, severity, component, message,
+                  process_state, command_id, metadata, created_at
+           FROM device_events
+           WHERE device_id = ?
+           ORDER BY created_at DESC, id DESC
+           LIMIT 20`,
+          [deviceId]
+        ),
+        pool.execute(
+          `SELECT last_seen_at
+           FROM device_control_presence
+           WHERE device_id = ?
+           LIMIT 1`,
+          [deviceId]
+        )
+      ]);
+      const commands = commandRows.map(mapDeviceCommand);
+      const events = eventRows.map(mapDeviceEvent);
+      const lastSeenAt = presenceRows[0]?.last_seen_at || null;
+      return {
+        deviceId,
+        processState: inferProcessState(events, commands),
+        device: {
+          connected: Boolean(lastSeenAt && new Date(lastSeenAt) >= onlineAfter),
+          lastSeenAt: lastSeenAt ? new Date(lastSeenAt).toISOString() : null,
+          lastEventAt: events[0]?.createdAt || null
+        },
+        commands,
+        events
       };
     },
     async getIotMonitoring() {
@@ -1325,6 +1537,74 @@ function liveSensorStatus(name, value, fallbackStatus) {
   if (sensorName.includes("temperature")) return value > 34 || value < 24 ? "Warning" : "Normal";
   if (sensorName.includes("tds")) return value > 210 ? "Warning" : "Good";
   return fallbackStatus || "Normal";
+}
+
+async function ensureDeviceControlSchema(pool) {
+  await pool.execute(
+    `CREATE TABLE IF NOT EXISTS device_commands (
+       id CHAR(36) PRIMARY KEY,
+       device_id VARCHAR(80) NOT NULL,
+       command VARCHAR(20) NOT NULL,
+       status VARCHAR(20) NOT NULL DEFAULT 'queued',
+       idempotency_key VARCHAR(120) NULL,
+       message VARCHAR(240) NOT NULL DEFAULT '',
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       expires_at DATETIME(3) NOT NULL,
+       delivered_at DATETIME(3) NULL,
+       completed_at DATETIME(3) NULL,
+       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       UNIQUE KEY uq_device_command_idempotency (device_id, idempotency_key),
+       INDEX idx_device_command_queue (device_id, status, created_at),
+       INDEX idx_device_command_expiry (status, expires_at)
+     ) ENGINE=InnoDB`
+  );
+  await pool.execute(
+    `CREATE TABLE IF NOT EXISTS device_events (
+       id CHAR(36) PRIMARY KEY,
+       device_id VARCHAR(80) NOT NULL,
+       event_key VARCHAR(120) NULL,
+       event_type VARCHAR(64) NOT NULL,
+       severity VARCHAR(16) NOT NULL DEFAULT 'info',
+       component VARCHAR(64) NOT NULL DEFAULT 'system',
+       message VARCHAR(500) NOT NULL,
+       process_state VARCHAR(24) NULL,
+       command_id CHAR(36) NULL,
+       metadata JSON NOT NULL,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       UNIQUE KEY uq_device_event_key (device_id, event_key),
+       INDEX idx_device_events_recent (device_id, created_at),
+       INDEX idx_device_events_command (command_id)
+     ) ENGINE=InnoDB`
+  );
+  await pool.execute(
+    `CREATE TABLE IF NOT EXISTS device_control_presence (
+       device_id VARCHAR(80) PRIMARY KEY,
+       last_seen_at DATETIME(3) NOT NULL,
+       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+         ON UPDATE CURRENT_TIMESTAMP(3)
+     ) ENGINE=InnoDB`
+  );
+}
+
+async function expireMysqlCommands(executor, now) {
+  await executor.execute(
+    `UPDATE device_commands
+     SET status = 'expired',
+         message = IF(message = '', 'Command expired before device acknowledgement.', message),
+         completed_at = ?,
+         updated_at = ?
+     WHERE status = 'queued' AND expires_at <= ?`,
+    [now, now, now]
+  );
+}
+
+async function touchMysqlDevice(executor, deviceId, now) {
+  await executor.execute(
+    `INSERT INTO device_control_presence (device_id, last_seen_at, updated_at)
+     VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE last_seen_at = VALUES(last_seen_at), updated_at = VALUES(updated_at)`,
+    [deviceId, now, now]
+  );
 }
 
 module.exports = { createMysqlStore };

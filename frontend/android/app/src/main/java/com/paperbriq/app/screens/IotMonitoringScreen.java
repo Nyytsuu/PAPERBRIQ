@@ -36,15 +36,20 @@ public class IotMonitoringScreen implements AppScreen {
         JSONObject iot = controller.session().pagePayload("iot");
         JSONObject network = iot.optJSONObject("network");
         if (network == null) network = new JSONObject();
+        JSONObject controlStatus = controller.session().pagePayload("deviceControl");
+        JSONObject device = controlStatus.optJSONObject("device");
+        boolean machineOnline = device != null && device.optBoolean("connected", false);
+        JSONObject backendHealth = controller.session().pagePayload("backendHealth");
+        boolean databaseConfigured = !"not configured".equalsIgnoreCase(backendHealth.optString("database", "not configured"));
 
-        root.addView(ui.sectionTitle("Real-time Sensor Data", "Live"));
-        ui.addGrid(root, sensorCards(ui, iot.optJSONArray("sensors")), 2);
+        root.addView(ui.sectionTitle("Real-time Sensor Data", machineOnline ? "Live" : "ESP32 offline"));
+        ui.addGrid(root, sensorCards(ui, iot.optJSONArray("sensors"), machineOnline, databaseConfigured), 2);
 
         root.addView(ui.sectionTitle("Device Status", ""));
-        ui.addGrid(root, deviceCards(ui, iot.optJSONArray("devices")), 2);
+        ui.addGrid(root, deviceCards(ui, iot.optJSONArray("devices"), machineOnline), 2);
 
         root.addView(ui.sectionTitle("Hardware Health", "Live checks"));
-        root.addView(ui.simpleList(hardwareRows(iot.optJSONArray("hardware"))));
+        root.addView(ui.simpleList(hardwareRows(machineOnline ? iot.optJSONArray("hardware") : null)));
 
         ui.addGrid(root, new android.view.View[]{
             ui.infoListCard("System Alerts", alertRows(iot.optJSONArray("alerts"))),
@@ -53,31 +58,34 @@ public class IotMonitoringScreen implements AppScreen {
 
         root.addView(ui.sectionTitle("Network Health", ""));
         ui.addGrid(root, new android.view.View[]{
-            ui.statCard("Online Devices", network.optString("onlineDevices", "--"), "From device records", AppColors.GREEN),
-            ui.statCard("Packet Success", network.optString("packetSuccess", "--"), "From diagnostics", AppColors.GREEN),
-            ui.statCard("Response Time", network.has("responseTimeMs") && !network.isNull("responseTimeMs") ? network.optString("responseTimeMs") + " ms" : "--", "From network records", AppColors.GREEN),
-            ui.statCard("Last Data Sync", network.optString("lastDataSync", "--"), "From sensor records", AppColors.GREEN)
+            ui.statCard("Online Devices", machineOnline ? network.optString("onlineDevices", "--") : "0 / 1", "From device records", AppColors.GREEN),
+            ui.statCard("Packet Success", machineOnline ? network.optString("packetSuccess", "--") : "--", "From diagnostics", AppColors.GREEN),
+            ui.statCard("Response Time", machineOnline && network.has("responseTimeMs") && !network.isNull("responseTimeMs") ? network.optString("responseTimeMs") + " ms" : "--", "From network records", AppColors.GREEN),
+            ui.statCard("Last Data Sync", machineOnline ? network.optString("lastDataSync", "--") : "Never", "From sensor records", AppColors.GREEN)
         }, 2);
     }
 
-    private android.view.View[] sensorCards(Ui ui, JSONArray sensors) {
-        if (sensors == null || sensors.length() == 0) {
-            return new android.view.View[]{ui.sensorCard("No sensors", "--", "Waiting", AppColors.GREEN)};
+    private android.view.View[] sensorCards(Ui ui, JSONArray sensors, boolean machineOnline, boolean databaseConfigured) {
+        if (!machineOnline || sensors == null || sensors.length() == 0) {
+            return new android.view.View[]{ui.sensorCard("ESP32", "--", "Offline", AppColors.RED)};
         }
         android.view.View[] views = new android.view.View[sensors.length()];
         for (int index = 0; index < sensors.length(); index++) {
             JSONObject sensor = sensors.optJSONObject(index);
             if (sensor == null) sensor = new JSONObject();
-            String value = ui.formatNumber(sensor.optDouble("value", 0)) + " " + sensor.optString("unit", "");
-            int color = sensor.optString("status", "").equalsIgnoreCase("Warning") ? AppColors.RED : AppColors.GREEN;
-            views[index] = ui.sensorCard(sensor.optString("name", "Sensor"), value, sensor.optString("status", "--"), color);
+            boolean trustedSource = "esp32".equalsIgnoreCase(sensor.optString("source", "")) || databaseConfigured;
+            boolean hasValue = trustedSource && sensor.has("value") && !sensor.isNull("value");
+            String value = hasValue ? ui.formatNumber(sensor.optDouble("value")) + " " + sensor.optString("unit", "") : "--";
+            String status = hasValue ? sensor.optString("status", "--") : "No live data";
+            int color = status.equalsIgnoreCase("Warning") || !hasValue ? AppColors.RED : AppColors.GREEN;
+            views[index] = ui.sensorCard(sensor.optString("name", "Sensor"), value.trim(), status, color);
         }
         return views;
     }
 
-    private android.view.View[] deviceCards(Ui ui, JSONArray devices) {
-        if (devices == null || devices.length() == 0) {
-            return new android.view.View[]{ui.gaugeCard("No devices", "--", "Waiting")};
+    private android.view.View[] deviceCards(Ui ui, JSONArray devices, boolean machineOnline) {
+        if (!machineOnline || devices == null || devices.length() == 0) {
+            return new android.view.View[]{ui.gaugeCard("ESP32", "OFFLINE", "Waiting for telemetry")};
         }
         android.view.View[] views = new android.view.View[devices.length()];
         for (int index = 0; index < devices.length(); index++) {

@@ -11,48 +11,48 @@ const SENSOR_PROFILES = {
 
 function createLiveIotSnapshot(baseIot) {
   const now = new Date();
-  const seed = Math.floor(now.getTime() / 1000);
-  const sensors = (baseIot.sensors || []).map((sensor, index) => buildLiveSensor(sensor, seed, index));
+  const sensors = (baseIot.sensors || []).map((sensor) => buildLiveSensor(sensor, now));
+  const connected = sensors.some((sensor) => sensor.source === "esp32" && sensor.status !== "Offline");
   const rainwater = sensors.find((sensor) => sensor.name === "Rainwater Level");
   const battery = sensors.find((sensor) => sensor.name === "Battery Level");
-  const packetSuccess = 99.1 + wave(seed, 0.5, 9) * 0.7;
-  const responseTimeMs = Math.round(285 + wave(seed, 0.62, 12) * 55);
+  const latestTelemetryAt = latestSensorTimestamp(sensors);
 
   return {
     ...baseIot,
     generatedAt: now.toISOString(),
     displayTime: formatManilaTime(now),
-    freshnessSeconds: 0,
+    freshnessSeconds: latestTelemetryAt ? Math.max(0, Math.round((now.getTime() - latestTelemetryAt.getTime()) / 1000)) : null,
     nextPollMs: 4000,
     machine: {
       id: "PBQ-MCH-001",
       name: "PaperBriq Station 01",
-      state: "Running",
+      state: connected ? "Online" : "Offline",
       barangay: "San Isidro",
-      cycle: "Pulping and mixing",
-      health: getMachineHealth(sensors)
+      cycle: connected ? "Receiving ESP32 telemetry" : "Waiting for ESP32 telemetry",
+      health: connected ? getMachineHealth(sensors) : "No live device data"
     },
     sensors,
-    devices: buildLiveDevices(baseIot.devices || [], seed),
-    alerts: buildLiveAlerts(baseIot.alerts || [], rainwater, battery),
+    devices: buildLiveDevices(baseIot.devices || [], connected),
+    alerts: buildLiveAlerts(baseIot.alerts || [], rainwater, battery, connected),
     diagnostics: (baseIot.diagnostics || []).map((diagnostic) => ({
       ...diagnostic,
+      status: connected ? diagnostic.status : "Offline",
       checkedAt: formatManilaTime(now)
     })),
-    hardware: buildHardwareHealth(sensors, baseIot.diagnostics || [], now),
+    hardware: buildHardwareHealth(sensors, baseIot.diagnostics || [], now, connected),
     network: {
       ...(baseIot.network || {}),
-      onlineDevices: "12 / 12",
-      packetSuccess: `${packetSuccess.toFixed(1)}%`,
-      responseTimeMs,
-      lastDataSync: formatManilaTime(now),
-      transport: "MQTT bridge",
-      signal: "Strong"
+      onlineDevices: connected ? "1 / 1" : "0 / 1",
+      packetSuccess: connected ? "Receiving" : "--",
+      responseTimeMs: null,
+      lastDataSync: latestTelemetryAt ? formatManilaTime(latestTelemetryAt) : "Never",
+      transport: "HTTPS telemetry",
+      signal: connected ? "Connected" : "Offline"
     }
   };
 }
 
-function buildHardwareHealth(sensors, diagnostics, now) {
+function buildHardwareHealth(sensors, diagnostics, now, connected) {
   const statusFor = (name) => sensors.find((sensor) => sensor.name === name)?.status || "No data";
   const isHealthy = (status) => /normal|good|ok|online/i.test(status);
   const temperatureStatus = statusFor("Temperature");
@@ -60,6 +60,14 @@ function buildHardwareHealth(sensors, diagnostics, now) {
   const controllerStatus = diagnostics.find((item) => /edge controller/i.test(item.item || ""))?.status || "No data";
   const sensorLinkStatus = diagnostics.find((item) => /sensor connectivity/i.test(item.item || ""))?.status || "No data";
   const checkedAt = formatManilaTime(now);
+
+  if (!connected) {
+    return [
+      { name: "DHT22", detail: "Temperature and humidity sensor", status: "Offline", checkedAt },
+      { name: "IR Sensor", detail: "Object detection sensor", status: "Offline", checkedAt },
+      { name: "TFT Display", detail: "Local monitoring display", status: "Offline", checkedAt }
+    ];
+  }
 
   return [
     {
@@ -83,34 +91,23 @@ function buildHardwareHealth(sensors, diagnostics, now) {
   ];
 }
 
-function buildLiveSensor(sensor, seed, index) {
-  if (sensor.source === "esp32") {
+function buildLiveSensor(sensor, now) {
+  if (sensor.source === "esp32" && isFreshTelemetry(sensor.updatedAt, now)) {
     return {
       ...sensor,
       trend: [...(sensor.trend || []).slice(-11), Number(sensor.value)],
       delta: 0,
-      updatedAt: sensor.updatedAt || formatManilaTime(new Date())
+      updatedAt: sensor.updatedAt
     };
   }
-  const profile = SENSOR_PROFILES[sensor.name] || {
-    base: Number(sensor.value) || 0,
-    amplitude: Math.max(1, Number(sensor.value) * 0.06),
-    decimals: 1,
-    low: Number.NEGATIVE_INFINITY,
-    high: Number.POSITIVE_INFINITY
-  };
-  const rawValue = profile.base + wave(seed, 0.42 + index * 0.05, index) * profile.amplitude;
-  const value = Number(rawValue.toFixed(profile.decimals));
-  const previousValue = Number((profile.base + wave(seed - 12, 0.42 + index * 0.05, index) * profile.amplitude).toFixed(profile.decimals));
-  const delta = Number((value - previousValue).toFixed(profile.decimals));
 
   return {
     ...sensor,
-    value,
-    status: getSensorStatus(sensor.name, value, profile),
-    trend: buildTrend(profile, seed, index),
-    delta,
-    updatedAt: formatManilaTime(new Date())
+    value: null,
+    status: "Offline",
+    trend: [],
+    delta: null,
+    updatedAt: sensor.source === "esp32" ? sensor.updatedAt : "Never"
   };
 }
 
@@ -121,30 +118,32 @@ function buildTrend(profile, seed, index) {
   });
 }
 
-function buildLiveDevices(devices, seed) {
-  return devices.map((device, index) => {
-    if (device.name === "Heater Status") {
-      const heaterOn = wave(seed, 0.2, index) > 0.58;
-      return { ...device, value: heaterOn ? "ON" : "OFF", status: heaterOn ? "Heating" : "Standby" };
-    }
-    return {
-      ...device,
-      status: device.status === "Secure" ? "Secure" : "Running",
-      load: `${Math.round(62 + wave(seed, 0.36, index) * 18)}%`
-    };
-  });
+function buildLiveDevices(devices, connected) {
+  return devices.map((device) => ({
+    ...device,
+    value: "--",
+    status: connected ? "No actuator telemetry" : "Offline",
+    load: null
+  }));
 }
 
-function buildLiveAlerts(alerts, rainwater, battery) {
+function buildLiveAlerts(alerts, rainwater, battery, connected) {
+  if (!connected) {
+    return [{
+      title: "ESP32 Offline",
+      severity: "Warning",
+      message: "No recent telemetry has been received from the PaperBriq ESP32."
+    }];
+  }
   const liveAlerts = [...alerts];
-  if (rainwater && rainwater.value < 76) {
+  if (rainwater && rainwater.value !== null && rainwater.value < 76) {
     liveAlerts.unshift({
       title: "Rainwater Level Dropping",
       severity: "Warning",
       message: `Rainwater tank is at ${rainwater.value}%. Prepare refill or harvesting check.`
     });
   }
-  if (battery && battery.value < 90) {
+  if (battery && battery.value !== null && battery.value < 90) {
     liveAlerts.unshift({
       title: "Battery Below Target",
       severity: "Info",
@@ -152,6 +151,24 @@ function buildLiveAlerts(alerts, rainwater, battery) {
     });
   }
   return liveAlerts.slice(0, 5);
+}
+
+function isFreshTelemetry(value, now) {
+  if (!value) return false;
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return false;
+  const configured = Number(process.env.IOT_TELEMETRY_ONLINE_SECONDS || 20);
+  const onlineSeconds = Number.isFinite(configured) ? Math.min(600, Math.max(10, configured)) : 20;
+  return now.getTime() - timestamp.getTime() <= onlineSeconds * 1000;
+}
+
+function latestSensorTimestamp(sensors) {
+  const timestamps = sensors
+    .filter((sensor) => sensor.source === "esp32" && sensor.updatedAt)
+    .map((sensor) => new Date(sensor.updatedAt))
+    .filter((date) => !Number.isNaN(date.getTime()));
+  if (!timestamps.length) return null;
+  return new Date(Math.max(...timestamps.map((date) => date.getTime())));
 }
 
 function getSensorStatus(name, value, profile) {

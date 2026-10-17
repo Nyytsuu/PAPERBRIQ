@@ -72,10 +72,51 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS device_commands (
+  id UUID PRIMARY KEY,
+  device_id VARCHAR(80) NOT NULL,
+  command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset')),
+  status VARCHAR(20) NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'delivered', 'completed', 'failed', 'expired')),
+  idempotency_key VARCHAR(120),
+  message VARCHAR(240) NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  delivered_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (device_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS device_events (
+  id UUID PRIMARY KEY,
+  device_id VARCHAR(80) NOT NULL,
+  event_key VARCHAR(120),
+  event_type VARCHAR(64) NOT NULL,
+  severity VARCHAR(16) NOT NULL DEFAULT 'info',
+  component VARCHAR(64) NOT NULL DEFAULT 'system',
+  message VARCHAR(500) NOT NULL,
+  process_state VARCHAR(24),
+  command_id UUID,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (device_id, event_key)
+);
+
+CREATE TABLE IF NOT EXISTS device_control_presence (
+  device_id VARCHAR(80) PRIMARY KEY,
+  last_seen_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_app_users_role ON app_users(role);
 CREATE INDEX IF NOT EXISTS idx_collection_events_barangay ON collection_events(barangay);
 CREATE INDEX IF NOT EXISTS idx_collection_events_collected_at ON collection_events(collected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_briquette_batches_produced_at ON briquette_batches(produced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_command_queue ON device_commands(device_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_device_command_expiry ON device_commands(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_device_events_recent ON device_events(device_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_events_command ON device_events(command_id);
 
 CREATE OR REPLACE VIEW dashboard_totals AS
 SELECT

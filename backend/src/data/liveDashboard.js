@@ -1,37 +1,22 @@
 function createLiveSummarySnapshot(baseSummary) {
   const now = new Date();
-  const tick = Math.floor(now.getTime() / 4000);
-  const cycle = tick % 60;
-  const paperDelta = Number((cycle * 0.18 + wave(tick, 0.8, 1) * 0.12).toFixed(2));
-  const briquetteDelta = Math.floor(cycle / 4);
-  const totals = baseSummary.totals || {};
-  const paperKg = Number((Number(totals.paperKg || 0) + paperDelta).toFixed(2));
 
   return {
     ...baseSummary,
     generatedAt: now.toISOString(),
-    displayTime: formatManilaTime(now),
-    totals: {
-      paperKg,
-      briquettes: Number(totals.briquettes || 0) + briquetteDelta,
-      contributors: Number(totals.contributors || 0) + (cycle > 42 ? 1 : 0),
-      co2KgAvoided: Number((Number(totals.co2KgAvoided || 0) + paperDelta * 0.82).toFixed(2))
-    },
-    collections: buildLiveCollections(baseSummary.collections || [], now, cycle),
-    batches: buildLiveBatches(baseSummary.batches || [], cycle)
+    displayTime: formatManilaTime(now)
   };
 }
 
-function createLiveDashboardSnapshot(baseDashboard, summary) {
+function createLiveDashboardSnapshot(baseDashboard, summary, iotData = {}) {
   const now = new Date();
-  const tick = Math.floor(now.getTime() / 4000);
-  const rainwaterLevel = clamp(Math.round(77 + wave(tick, 0.38, 2) * 5), 68, 90);
-  const batteryLevel = clamp(Math.round(91 + wave(tick, 0.32, 4) * 4), 84, 98);
-  const temperatureC = Number((29.4 + wave(tick, 0.34, 4) * 2.1).toFixed(1));
-  const humidityPercent = clamp(Math.round(65 + wave(tick, 0.29, 6) * 7), 45, 78);
-  const powerOutputWatts = clamp(Math.round(238 + wave(tick, 0.6, 5) * 34), 180, 290);
-  const overallProgress = clamp(Math.round(58 + (tick % 34) * 1.1), 58, 94);
-  const completedBriquettes = Math.max(8, Math.floor(overallProgress / 6));
+  const sensors = iotData.sensors || [];
+  const connected = sensors.some((sensor) => sensor.source === "esp32" && telemetryIsFresh(sensor.updatedAt, now));
+  const sensorValue = (name) => {
+    const sensor = sensors.find((item) => item.name === name && item.source === "esp32" && telemetryIsFresh(item.updatedAt, now));
+    return sensor ? Number(sensor.value) : null;
+  };
+  const overallProgress = connected ? Number(baseDashboard.overallProgress || 0) : 0;
 
   return {
     ...baseDashboard,
@@ -41,23 +26,29 @@ function createLiveDashboardSnapshot(baseDashboard, summary) {
     overallProgress,
     systemStatus: {
       ...(baseDashboard.systemStatus || {}),
-      status: "Running",
-      message: `Live machine sync completed at ${formatManilaTime(now)}.`,
-      rainwaterLevel,
-      batteryLevel,
-      temperatureC,
-      humidityPercent,
-      powerOutputWatts
+      status: connected ? "Online" : "Offline",
+      message: connected ? `ESP32 telemetry received at ${formatManilaTime(now)}.` : "Waiting for ESP32 telemetry.",
+      rainwaterLevel: sensorValue("Rainwater Level"),
+      batteryLevel: null,
+      temperatureC: sensorValue("Temperature"),
+      humidityPercent: sensorValue("Humidity"),
+      powerOutputWatts: null
     },
-    processProgress: buildLiveProcess(baseDashboard.processProgress || [], overallProgress),
-    processLog: buildLiveProcessLog(baseDashboard.processLog || [], now, overallProgress),
+    processProgress: connected ? (baseDashboard.processProgress || []) : [],
+    processLog: connected ? (baseDashboard.processLog || []) : [],
     weeklySummary: {
-      ...(baseDashboard.weeklySummary || {}),
-      paperWasteKg: Math.round(Number(summary?.totals?.paperKg || 0) * 0.1),
-      briquettesProduced: completedBriquettes,
-      activeContributors: Number(summary?.totals?.contributors || 0)
+      ...(baseDashboard.weeklySummary || {})
     }
   };
+}
+
+function telemetryIsFresh(value, now) {
+  if (!value) return false;
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return false;
+  const configured = Number(process.env.IOT_TELEMETRY_ONLINE_SECONDS || 20);
+  const onlineSeconds = Number.isFinite(configured) ? Math.min(600, Math.max(10, configured)) : 20;
+  return now.getTime() - timestamp.getTime() <= onlineSeconds * 1000;
 }
 
 function buildLiveCollections(collections, now, cycle) {

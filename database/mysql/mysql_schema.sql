@@ -182,6 +182,47 @@ CREATE TABLE IF NOT EXISTS process_actions (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS device_commands (
+  id CHAR(36) PRIMARY KEY,
+  device_id VARCHAR(80) NOT NULL,
+  command VARCHAR(20) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'queued',
+  idempotency_key VARCHAR(120),
+  message VARCHAR(240) NOT NULL DEFAULT '',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  expires_at DATETIME(3) NOT NULL,
+  delivered_at DATETIME(3),
+  completed_at DATETIME(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_device_command_idempotency (device_id, idempotency_key),
+  INDEX idx_device_command_queue (device_id, status, created_at),
+  INDEX idx_device_command_expiry (status, expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS device_events (
+  id CHAR(36) PRIMARY KEY,
+  device_id VARCHAR(80) NOT NULL,
+  event_key VARCHAR(120),
+  event_type VARCHAR(64) NOT NULL,
+  severity VARCHAR(16) NOT NULL DEFAULT 'info',
+  component VARCHAR(64) NOT NULL DEFAULT 'system',
+  message VARCHAR(500) NOT NULL,
+  process_state VARCHAR(24),
+  command_id CHAR(36),
+  metadata JSON NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uq_device_event_key (device_id, event_key),
+  INDEX idx_device_events_recent (device_id, created_at),
+  INDEX idx_device_events_command (command_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS device_control_presence (
+  device_id VARCHAR(80) PRIMARY KEY,
+  last_seen_at DATETIME(3) NOT NULL,
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+    ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS iot_sensor_readings (
   id CHAR(36) PRIMARY KEY DEFAULT (UUID()),
   sensor_name VARCHAR(120) NOT NULL,

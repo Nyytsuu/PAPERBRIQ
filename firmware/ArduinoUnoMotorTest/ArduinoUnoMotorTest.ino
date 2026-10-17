@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Servo.h>
+#include <SoftwareSerial.h>
 
 // PaperBriq Arduino Uno shredder, mixer, and mixer-gate bench test.
 // Test only unloaded, securely clamped motors with a fused 12 V supply and
@@ -8,8 +9,26 @@
 // BTS7960 signal pins used by this test.
 const uint8_t SHREDDER_RPWM = 5;  // Hardware PWM
 const uint8_t SHREDDER_LPWM = 6;  // Hardware PWM
-const uint8_t MIXER_RPWM = 3;     // Hardware PWM; move from D8 to D3
-const uint8_t MIXER_LPWM = 11;    // Hardware PWM; move from D9 to D11
+const uint8_t PRESSER_RPWM = 7;
+const uint8_t PRESSER_LPWM = 8;
+
+// Kept on the operator-selected pins. Servo uses Timer1, so D9/D10 are used
+// as reliable full-speed digital direction outputs, not analogWrite PWM.
+const uint8_t MIXER_RPWM = 9;
+const uint8_t MIXER_LPWM = 10;
+
+// Pusher L298N channel B, kept on the operator-selected direction pins.
+// ENB is permanently connected to a regulated 5 V rail, so D13 is unused.
+const uint8_t PUSHER_IN3 = 11;
+const uint8_t PUSHER_IN4 = 12;
+
+// Private 9600-baud command/event link to ESP32 UART2. A2/A3 work as Uno
+// digital pins 16/17. A2 receives the ESP32's 3.3 V TX directly. A3
+// transmits 5 V and MUST pass through a level shifter or resistor divider.
+const uint8_t ESP_LINK_RX = A2;
+const uint8_t ESP_LINK_TX = A3;
+const unsigned long ESP_LINK_BAUD = 9600;
+SoftwareSerial espLink(ESP_LINK_RX, ESP_LINK_TX);
 
 // Mixer gate servo signal. A0 works as digital pin 14 on an Arduino Uno.
 const uint8_t MIXER_GATE_SERVO_PIN = A0;
@@ -23,8 +42,8 @@ const uint8_t MIXER_GATE_OPEN_ANGLE = 130;
 
 // Initial conservative molder angles. Adjust gradually for its linkage and
 // swap the values if its physical open/close direction is reversed.
-const uint8_t MOLDER_CLOSED_ANGLE = 90;
-const uint8_t MOLDER_OPEN_ANGLE = 120;
+const uint8_t MOLDER_CLOSED_ANGLE = 120;
+const uint8_t MOLDER_OPEN_ANGLE = 0;
 // Independent motor speeds. PWM range: 0-255.
 // 77 = 30%, 102 = 40%, 128 = 50%, 191 = 75%, 255 = 100%.
 const uint8_t SHREDDER_FORWARD_DUTY = 102;  // 40%
@@ -35,11 +54,19 @@ const uint8_t MIXER_REVERSE_DUTY = 77;      // 30%
 // Bench-test time limits. Every motor pulse stops automatically.
 const unsigned long SHREDDER_PULSE_MS = 1200;
 const unsigned long MIXER_PULSE_MS = 1200;
+const unsigned long PRESSER_PULSE_MS = 1000;
+const unsigned long PUSHER_PULSE_MS = 5000;
 
 // Automatic demonstration process timings. Start with P after arming with R.
 // Increase these only after the complete unloaded sequence works safely.
 const unsigned long PROCESS_SHREDDER_RUN_MS = 5000;
-const unsigned long PROCESS_MIXER_RUN_MS = 10000;
+// The mixer starts with the shredder, then continues alone for this long.
+const unsigned long PROCESS_MIXER_FINISH_MS = 5000;
+const unsigned long PROCESS_MATERIAL_RELEASE_MS = 3000;
+const unsigned long PROCESS_PRESSER_EXTEND_MS = 5000;
+const unsigned long PROCESS_PRESSER_RETRACT_MS = 5000;
+const unsigned long PROCESS_PUSHER_EXTEND_MS = 5000;
+const unsigned long PROCESS_PUSHER_RETRACT_MS = 5000;
 const unsigned long MIXER_GATE_TRAVEL_MS = 1500;
 const unsigned long MOLDER_TRAVEL_MS = 1500;
 const unsigned long PROCESS_CLOSE_TRAVEL_MS =
@@ -56,7 +83,11 @@ enum Motion : uint8_t {
   SHREDDER_FORWARD,
   SHREDDER_REVERSE,
   MIXER_FORWARD,
-  MIXER_REVERSE
+  MIXER_REVERSE,
+  PRESSER_EXTEND,
+  PRESSER_RETRACT,
+  PUSHER_FORWARD,
+  PUSHER_REVERSE
 };
 
 enum RunState : uint8_t {
@@ -69,10 +100,20 @@ enum AutomaticProcessState : uint8_t {
   PROCESS_IDLE,
   PROCESS_WAITING_TO_CLOSE_GATE,
   PROCESS_WAITING_FOR_GATE_TO_CLOSE,
-  PROCESS_SHREDDING,
-  PROCESS_MIXING,
+  PROCESS_SHREDDING_AND_MIXING,
+  PROCESS_MIXER_FINISHING,
   PROCESS_WAITING_TO_OPEN_GATE,
-  PROCESS_WAITING_FOR_GATE_TO_OPEN
+  PROCESS_WAITING_FOR_GATE_TO_OPEN,
+  PROCESS_RELEASING_MATERIAL,
+  PROCESS_WAITING_FOR_MIXER_GATE_TO_CLOSE,
+  PROCESS_PRESSER_EXTENDING,
+  PROCESS_PRESSER_RETRACTING,
+  PROCESS_WAITING_TO_OPEN_MOLDER,
+  PROCESS_WAITING_FOR_MOLDER_TO_OPEN,
+  PROCESS_PUSHER_EXTENDING,
+  PROCESS_PUSHER_RETRACTING,
+  PROCESS_WAITING_TO_CLOSE_MOLDER,
+  PROCESS_WAITING_FOR_MOLDER_TO_CLOSE
 };
 
 Servo mixerGateServo;
@@ -89,6 +130,66 @@ unsigned long requestedRunDurationMs = 0;
 unsigned long activeRunDurationMs = 0;
 bool softwareStopLatched = true;
 
+const uint8_t BRIDGE_LINE_CAPACITY = 64;
+char bridgeLine[BRIDGE_LINE_CAPACITY];
+uint8_t bridgeLineLength = 0;
+unsigned long bridgeLastByteAtMs = 0;
+const unsigned long BRIDGE_FRAME_TIMEOUT_MS = 750;
+char lastRemoteCommandId[40] = "";
+char lastRemoteStatus[10] = "";
+char lastRemoteMessage[20] = "";
+
+void printEventLine(Print &output, const __FlashStringHelper *type,
+                    const __FlashStringHelper *severity,
+                    const __FlashStringHelper *component,
+                    const __FlashStringHelper *processState,
+                    const __FlashStringHelper *message) {
+  output.print(F("EVENT|"));
+  output.print(type);
+  output.print('|');
+  output.print(severity);
+  output.print('|');
+  output.print(component);
+  output.print('|');
+  output.print(processState);
+  output.print('|');
+  output.println(message);
+}
+
+void emitEvent(const __FlashStringHelper *type,
+               const __FlashStringHelper *severity,
+               const __FlashStringHelper *component,
+               const __FlashStringHelper *processState,
+               const __FlashStringHelper *message) {
+  printEventLine(espLink, type, severity, component, processState, message);
+  printEventLine(Serial, type, severity, component, processState, message);
+}
+
+void printAckLine(Print &output, const char *id, const char *status,
+                  const char *message) {
+  output.print(F("ACK|"));
+  output.print(id);
+  output.print('|');
+  output.print(status);
+  output.print('|');
+  output.println(message);
+}
+
+void emitAck(const char *id, const char *status, const char *message) {
+  printAckLine(espLink, id, status, message);
+  printAckLine(Serial, id, status, message);
+}
+
+void rememberRemoteResult(const char *id, const char *status,
+                          const char *message) {
+  strncpy(lastRemoteCommandId, id, sizeof(lastRemoteCommandId) - 1);
+  lastRemoteCommandId[sizeof(lastRemoteCommandId) - 1] = '\0';
+  strncpy(lastRemoteStatus, status, sizeof(lastRemoteStatus) - 1);
+  lastRemoteStatus[sizeof(lastRemoteStatus) - 1] = '\0';
+  strncpy(lastRemoteMessage, message, sizeof(lastRemoteMessage) - 1);
+  lastRemoteMessage[sizeof(lastRemoteMessage) - 1] = '\0';
+}
+
 uint8_t dutyPercent(uint8_t duty) {
   return static_cast<uint8_t>((static_cast<unsigned int>(duty) * 100U) / 255U);
 }
@@ -103,6 +204,14 @@ const __FlashStringHelper *motionName(Motion motion) {
       return F("MIXER FORWARD");
     case MIXER_REVERSE:
       return F("MIXER REVERSE");
+    case PRESSER_EXTEND:
+      return F("PRESSER EXTEND");
+    case PRESSER_RETRACT:
+      return F("PRESSER RETRACT");
+    case PUSHER_FORWARD:
+      return F("PUSHER FORWARD");
+    case PUSHER_REVERSE:
+      return F("PUSHER REVERSE");
     default:
       return F("STOPPED");
   }
@@ -115,9 +224,13 @@ uint8_t motionDuty(Motion motion) {
     case SHREDDER_REVERSE:
       return SHREDDER_REVERSE_DUTY;
     case MIXER_FORWARD:
-      return MIXER_FORWARD_DUTY;
     case MIXER_REVERSE:
-      return MIXER_REVERSE_DUTY;
+      return 255;
+    case PRESSER_EXTEND:
+    case PRESSER_RETRACT:
+    case PUSHER_FORWARD:
+    case PUSHER_REVERSE:
+      return 255;
     default:
       return 0;
   }
@@ -131,6 +244,12 @@ unsigned long motionDurationMs(Motion motion) {
     case MIXER_FORWARD:
     case MIXER_REVERSE:
       return MIXER_PULSE_MS;
+    case PRESSER_EXTEND:
+    case PRESSER_RETRACT:
+      return PRESSER_PULSE_MS;
+    case PUSHER_FORWARD:
+    case PUSHER_REVERSE:
+      return PUSHER_PULSE_MS;
     default:
       return 0;
   }
@@ -142,6 +261,10 @@ void stopMotorOutputs() {
   digitalWrite(SHREDDER_LPWM, LOW);
   digitalWrite(MIXER_RPWM, LOW);
   digitalWrite(MIXER_LPWM, LOW);
+  digitalWrite(PRESSER_RPWM, LOW);
+  digitalWrite(PRESSER_LPWM, LOW);
+  digitalWrite(PUSHER_IN3, LOW);
+  digitalWrite(PUSHER_IN4, LOW);
 }
 
 void stopAllMotors(bool printMessage = true) {
@@ -289,22 +412,27 @@ void latchSoftwareStop() {
   softwareStopLatchedAtMs = millis();
   Serial.println(F("SOFTWARE STOP LATCHED: motors stopped, servos released"));
   Serial.println(F("Inspect the machine, then send R to arm again."));
+  emitEvent(F("STOPPED"), F("warning"), F("controller"), F("stopped"),
+            F("Software stop latched"));
 }
 
-void armMotorTest() {
+bool armMotorTest() {
   if (automaticProcessIsActive()) {
     Serial.println(F("ARM REJECTED: automatic process is already running"));
-    return;
+    return false;
   }
 
   if (millis() - softwareStopLatchedAtMs < SOFTWARE_STOP_REARM_DELAY_MS) {
     Serial.println(F("ARM REJECTED: wait 1 second after X, then send R again"));
-    return;
+    return false;
   }
 
   stopAllMotors(false);
   softwareStopLatched = false;
   Serial.println(F("MOTOR TEST ARMED: motor and gate commands enabled"));
+  emitEvent(F("ARMED"), F("info"), F("controller"), F("stopped"),
+            F("Controller armed"));
+  return true;
 }
 
 void printHelp() {
@@ -315,7 +443,11 @@ void printHelp() {
   Serial.println(F("2 = shredder reverse pulse"));
   Serial.println(F("3 = mixer forward pulse"));
   Serial.println(F("4 = mixer reverse pulse"));
-  Serial.println(F("P = run full process: close, shred, mix, open"));
+  Serial.println(F("E = presser extend pulse"));
+  Serial.println(F("T = presser retract pulse"));
+  Serial.println(F("F = pusher forward pulse"));
+  Serial.println(F("B = pusher reverse pulse"));
+  Serial.println(F("P = run the complete shred, mix, press, and eject cycle"));
   Serial.println(F("O = open mixer gate servo"));
   Serial.println(F("C = close mixer gate servo"));
   Serial.println(F("D = release mixer gate servo"));
@@ -379,12 +511,34 @@ void startRequestedMotion() {
 
     case MIXER_FORWARD:
       digitalWrite(MIXER_LPWM, LOW);
-      analogWrite(MIXER_RPWM, MIXER_FORWARD_DUTY);
+      digitalWrite(MIXER_RPWM, HIGH);
       break;
 
     case MIXER_REVERSE:
       digitalWrite(MIXER_RPWM, LOW);
-      analogWrite(MIXER_LPWM, MIXER_REVERSE_DUTY);
+      digitalWrite(MIXER_LPWM, HIGH);
+      break;
+
+    case PRESSER_EXTEND:
+      digitalWrite(PRESSER_LPWM, LOW);
+      digitalWrite(PRESSER_RPWM, HIGH);
+      break;
+
+    case PRESSER_RETRACT:
+      digitalWrite(PRESSER_RPWM, LOW);
+      digitalWrite(PRESSER_LPWM, HIGH);
+      break;
+
+    case PUSHER_FORWARD:
+      // This actuator's installed polarity extends when IN4 is HIGH.
+      digitalWrite(PUSHER_IN3, LOW);
+      digitalWrite(PUSHER_IN4, HIGH);
+      break;
+
+    case PUSHER_REVERSE:
+      // Retract using the opposite polarity.
+      digitalWrite(PUSHER_IN4, LOW);
+      digitalWrite(PUSHER_IN3, HIGH);
       break;
 
     default:
@@ -396,6 +550,16 @@ void startRequestedMotion() {
   Serial.print(F(": running for "));
   Serial.print(activeRunDurationMs);
   Serial.println(F(" ms"));
+  if (activeMotion == MIXER_FORWARD || activeMotion == MIXER_REVERSE) {
+    emitEvent(F("MIXER_STARTED"), F("info"), F("mixer"), F("running"),
+              F("Mixer started"));
+  } else if (activeMotion == PRESSER_EXTEND || activeMotion == PRESSER_RETRACT) {
+    emitEvent(F("PRESSER_STARTED"), F("info"), F("presser"), F("running"),
+              F("Presser pulse started"));
+  } else if (activeMotion == PUSHER_FORWARD || activeMotion == PUSHER_REVERSE) {
+    emitEvent(F("PUSHER_STARTED"), F("info"), F("pusher"), F("running"),
+              F("Pusher pulse started"));
+  }
 }
 
 void serviceMotorState() {
@@ -419,23 +583,34 @@ void serviceMotorState() {
     stopAllMotors(false);
     Serial.print(motionName(completedMotion));
     Serial.println(F(": pulse complete; stopped"));
+    if (completedMotion == MIXER_FORWARD || completedMotion == MIXER_REVERSE) {
+      emitEvent(F("MIXER_COMPLETED"), F("info"), F("mixer"),
+                automaticProcessIsActive() ? F("running") : F("stopped"),
+                F("Mixer completed"));
+    } else if (completedMotion == PRESSER_EXTEND || completedMotion == PRESSER_RETRACT) {
+      emitEvent(F("PRESSER_COMPLETED"), F("info"), F("presser"),
+                F("stopped"), F("Presser pulse completed"));
+    } else if (completedMotion == PUSHER_FORWARD || completedMotion == PUSHER_REVERSE) {
+      emitEvent(F("PUSHER_COMPLETED"), F("info"), F("pusher"),
+                F("stopped"), F("Pusher pulse completed"));
+    }
   }
 }
 
-void startAutomaticProcess() {
+bool startAutomaticProcess() {
   if (softwareStopLatched) {
     Serial.println(F("PROCESS REJECTED: send R to arm first"));
-    return;
+    return false;
   }
 
   if (automaticProcessIsActive()) {
     Serial.println(F("PROCESS REJECTED: a process is already running"));
-    return;
+    return false;
   }
 
   if (runState != STATE_IDLE) {
     Serial.println(F("PROCESS REJECTED: wait for the manual motor test to stop"));
-    return;
+    return false;
   }
 
   stopAllMotors(false);
@@ -444,12 +619,15 @@ void startAutomaticProcess() {
 
   Serial.println();
   Serial.println(F("AUTOMATIC PROCESS STARTED"));
-  Serial.println(F("1/3 Waiting for motors, then closing mixer gate and molder"));
-  Serial.print(F("Shred time: "));
+  Serial.println(F("STEP: closing mixer gate and molder"));
+  Serial.print(F("Shredder + mixer time: "));
   Serial.print(PROCESS_SHREDDER_RUN_MS);
-  Serial.print(F(" ms | Mix time: "));
-  Serial.print(PROCESS_MIXER_RUN_MS);
+  Serial.print(F(" ms | Mixer-only finish time: "));
+  Serial.print(PROCESS_MIXER_FINISH_MS);
   Serial.println(F(" ms"));
+  emitEvent(F("PROCESS_STARTED"), F("info"), F("process"), F("running"),
+            F("Process started"));
+  return true;
 }
 
 void serviceAutomaticProcess() {
@@ -472,31 +650,52 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_FOR_GATE_TO_CLOSE:
       if (nowMs - processStateStartedAtMs >= PROCESS_CLOSE_TRAVEL_MS) {
-        Serial.println(F("2/3 Starting shredder"));
-        requestPulse(SHREDDER_FORWARD, PROCESS_SHREDDER_RUN_MS);
-        automaticProcessState = PROCESS_SHREDDING;
+        // Run both motors together. The shredder uses hardware PWM while the
+        // mixer uses its full-speed digital direction outputs on D9/D10.
+        stopMotorOutputs();
+        digitalWrite(SHREDDER_LPWM, LOW);
+        analogWrite(SHREDDER_RPWM, SHREDDER_FORWARD_DUTY);
+        // This installation's working mixer direction is LPWM/D10 (the same
+        // direction verified by manual command 4).
+        digitalWrite(MIXER_RPWM, LOW);
+        digitalWrite(MIXER_LPWM, HIGH);
+        automaticProcessState = PROCESS_SHREDDING_AND_MIXING;
+        processStateStartedAtMs = nowMs;
+        Serial.println(F("STEP: shredder and mixer started together"));
+        emitEvent(F("SHREDDER_MIXER_STARTED"), F("info"), F("process"),
+                  F("running"), F("Shredder and mixer started"));
       }
       break;
 
-    case PROCESS_SHREDDING:
-      if (runState == STATE_IDLE) {
-        Serial.println(F("Shredding complete; starting mixer after safety pause"));
-        requestPulse(MIXER_FORWARD, PROCESS_MIXER_RUN_MS);
-        automaticProcessState = PROCESS_MIXING;
+    case PROCESS_SHREDDING_AND_MIXING:
+      if (nowMs - processStateStartedAtMs >= PROCESS_SHREDDER_RUN_MS) {
+        // Stop only the shredder. The mixer remains running without a gap.
+        digitalWrite(SHREDDER_RPWM, LOW);
+        digitalWrite(SHREDDER_LPWM, LOW);
+        automaticProcessState = PROCESS_MIXER_FINISHING;
+        processStateStartedAtMs = nowMs;
+        Serial.println(F("STEP: shredder stopped; mixer continuing alone"));
+        emitEvent(F("SHREDDER_COMPLETED"), F("info"), F("shredder"),
+                  F("running"), F("Shredder stopped; mixer continuing"));
       }
       break;
 
-    case PROCESS_MIXING:
-      if (runState == STATE_IDLE) {
-        Serial.println(F("Mixing complete; waiting for mixer to stop"));
+    case PROCESS_MIXER_FINISHING:
+      if (nowMs - processStateStartedAtMs >= PROCESS_MIXER_FINISH_MS) {
+        digitalWrite(MIXER_RPWM, LOW);
+        digitalWrite(MIXER_LPWM, LOW);
+        lastMotorStoppedAtMs = nowMs;
         automaticProcessState = PROCESS_WAITING_TO_OPEN_GATE;
         processStateStartedAtMs = nowMs;
+        Serial.println(F("Mixer stopped; waiting before opening gate"));
+        emitEvent(F("MIXER_COMPLETED"), F("info"), F("mixer"),
+                  F("running"), F("Mixer finishing run completed"));
       }
       break;
 
     case PROCESS_WAITING_TO_OPEN_GATE:
       if (nowMs - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) {
-        Serial.println(F("3/3 Opening mixer gate"));
+        Serial.println(F("STEP: opening mixer gate; molder remains closed"));
         setMixerGateAngle(MIXER_GATE_OPEN_ANGLE, F("OPEN"));
         automaticProcessState = PROCESS_WAITING_FOR_GATE_TO_OPEN;
         processStateStartedAtMs = nowMs;
@@ -505,14 +704,204 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_FOR_GATE_TO_OPEN:
       if (nowMs - processStateStartedAtMs >= MIXER_GATE_TRAVEL_MS) {
+        automaticProcessState = PROCESS_RELEASING_MATERIAL;
+        processStateStartedAtMs = nowMs;
+        Serial.println(F("STEP: releasing material into the closed molder"));
+      }
+      break;
+
+    case PROCESS_RELEASING_MATERIAL:
+      if (nowMs - processStateStartedAtMs >= PROCESS_MATERIAL_RELEASE_MS) {
+        Serial.println(F("STEP: closing mixer gate before pressing"));
+        setMixerGateAngle(MIXER_GATE_CLOSED_ANGLE, F("CLOSED"));
+        automaticProcessState = PROCESS_WAITING_FOR_MIXER_GATE_TO_CLOSE;
+        processStateStartedAtMs = nowMs;
+      }
+      break;
+
+    case PROCESS_WAITING_FOR_MIXER_GATE_TO_CLOSE:
+      if (nowMs - processStateStartedAtMs >= MIXER_GATE_TRAVEL_MS) {
+        Serial.println(F("STEP: presser extending"));
+        requestPulse(PRESSER_EXTEND, PROCESS_PRESSER_EXTEND_MS);
+        automaticProcessState = PROCESS_PRESSER_EXTENDING;
+      }
+      break;
+
+    case PROCESS_PRESSER_EXTENDING:
+      if (runState == STATE_IDLE) {
+        Serial.println(F("STEP: presser extension complete; retracting"));
+        requestPulse(PRESSER_RETRACT, PROCESS_PRESSER_RETRACT_MS);
+        automaticProcessState = PROCESS_PRESSER_RETRACTING;
+      }
+      break;
+
+    case PROCESS_PRESSER_RETRACTING:
+      if (runState == STATE_IDLE) {
+        Serial.println(F("Presser retracted; waiting before opening molder"));
+        automaticProcessState = PROCESS_WAITING_TO_OPEN_MOLDER;
+        processStateStartedAtMs = nowMs;
+      }
+      break;
+
+    case PROCESS_WAITING_TO_OPEN_MOLDER:
+      if (nowMs - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) {
+        Serial.println(F("STEP: opening molder gate for ejection"));
+        setMolderAngle(MOLDER_OPEN_ANGLE, F("OPEN"));
+        automaticProcessState = PROCESS_WAITING_FOR_MOLDER_TO_OPEN;
+        processStateStartedAtMs = nowMs;
+      }
+      break;
+
+    case PROCESS_WAITING_FOR_MOLDER_TO_OPEN:
+      if (nowMs - processStateStartedAtMs >= MOLDER_TRAVEL_MS) {
+        Serial.println(F("STEP: molder open; pusher extending"));
+        requestPulse(PUSHER_FORWARD, PROCESS_PUSHER_EXTEND_MS);
+        automaticProcessState = PROCESS_PUSHER_EXTENDING;
+      }
+      break;
+
+    case PROCESS_PUSHER_EXTENDING:
+      if (runState == STATE_IDLE) {
+        Serial.println(F("STEP: pusher extension complete; retracting"));
+        requestPulse(PUSHER_REVERSE, PROCESS_PUSHER_RETRACT_MS);
+        automaticProcessState = PROCESS_PUSHER_RETRACTING;
+      }
+      break;
+
+    case PROCESS_PUSHER_RETRACTING:
+      if (runState == STATE_IDLE) {
+        Serial.println(F("Pusher retracted; waiting before closing molder"));
+        automaticProcessState = PROCESS_WAITING_TO_CLOSE_MOLDER;
+        processStateStartedAtMs = nowMs;
+      }
+      break;
+
+    case PROCESS_WAITING_TO_CLOSE_MOLDER:
+      if (nowMs - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) {
+        Serial.println(F("STEP: closing molder gate"));
+        setMolderAngle(MOLDER_CLOSED_ANGLE, F("CLOSED"));
+        automaticProcessState = PROCESS_WAITING_FOR_MOLDER_TO_CLOSE;
+        processStateStartedAtMs = nowMs;
+      }
+      break;
+
+    case PROCESS_WAITING_FOR_MOLDER_TO_CLOSE:
+      if (nowMs - processStateStartedAtMs >= MOLDER_TRAVEL_MS) {
         automaticProcessState = PROCESS_IDLE;
-        Serial.println(F("PROCESS COMPLETE: mixer gate open, molder closed"));
+        Serial.println(F("PROCESS COMPLETE: mixer and molder gates closed"));
+        emitEvent(F("PROCESS_COMPLETED"), F("info"), F("process"),
+                  F("stopped"), F("Complete process finished; gates closed"));
       }
       break;
 
     case PROCESS_IDLE:
     default:
       break;
+  }
+}
+
+bool validRemoteCommandId(const char *id) {
+  const size_t length = strlen(id);
+  if (length == 0 || length >= sizeof(lastRemoteCommandId)) return false;
+  for (size_t i = 0; i < length; ++i) {
+    const char c = id[i];
+    if (!isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+void failRemoteCommand(const char *id, const char *message) {
+  emitAck(id, "FAILED", message);
+  rememberRemoteResult(id, "FAILED", message);
+}
+
+void handleRemoteCommandFrame(char *line) {
+  char *prefix = strtok(line, "|");
+  char *id = strtok(nullptr, "|");
+  char *action = strtok(nullptr, "|");
+  char *extra = strtok(nullptr, "|");
+  if (prefix == nullptr || id == nullptr || action == nullptr || extra != nullptr ||
+      strcmp(prefix, "CMD") != 0 || !validRemoteCommandId(id)) {
+    latchSoftwareStop();
+    emitEvent(F("FAULT"), F("error"), F("controller"), F("fault"),
+              F("Invalid UART command"));
+    return;
+  }
+
+  // A repeated backend command ID must never repeat physical movement.
+  if (strcmp(id, lastRemoteCommandId) == 0 && lastRemoteStatus[0] != '\0') {
+    emitAck(id, lastRemoteStatus, lastRemoteMessage);
+    return;
+  }
+
+  emitAck(id, "DELIVERED", "received");
+
+  if (strcmp(action, "STOP") == 0) {
+    latchSoftwareStop();
+    emitAck(id, "COMPLETED", "stopped");
+    rememberRemoteResult(id, "COMPLETED", "stopped");
+    return;
+  }
+
+  if (strcmp(action, "RESET") == 0) {
+    // RESET only clears the latched software stop and leaves every motor off.
+    if (armMotorTest()) {
+      emitAck(id, "COMPLETED", "armed");
+      rememberRemoteResult(id, "COMPLETED", "armed");
+    } else {
+      failRemoteCommand(id, "reset_rejected");
+    }
+    return;
+  }
+
+  if (strcmp(action, "START") == 0) {
+    // Starting is deliberately separate from arming. After boot or STOP, the
+    // operator must issue RESET successfully before START can run anything.
+    if (softwareStopLatched) {
+      failRemoteCommand(id, "not_armed");
+    } else if (automaticProcessIsActive() || runState != STATE_IDLE) {
+      failRemoteCommand(id, "busy");
+    } else if (startAutomaticProcess()) {
+      emitAck(id, "COMPLETED", "started");
+      rememberRemoteResult(id, "COMPLETED", "started");
+    } else {
+      failRemoteCommand(id, "start_rejected");
+    }
+    return;
+  }
+
+  failRemoteCommand(id, "bad_command");
+}
+
+void bridgeProtocolFault(const __FlashStringHelper *message) {
+  bridgeLineLength = 0;
+  latchSoftwareStop();
+  emitEvent(F("FAULT"), F("error"), F("controller"), F("fault"), message);
+}
+
+void serviceBridgeCommands() {
+  while (espLink.available() > 0) {
+    const char c = static_cast<char>(espLink.read());
+    bridgeLastByteAtMs = millis();
+    if (c == '\n') {
+      bridgeLine[bridgeLineLength] = '\0';
+      if (bridgeLineLength > 0) handleRemoteCommandFrame(bridgeLine);
+      bridgeLineLength = 0;
+    } else if (c != '\r') {
+      if (bridgeLineLength + 1 < BRIDGE_LINE_CAPACITY) {
+        bridgeLine[bridgeLineLength++] = c;
+      } else {
+        bridgeProtocolFault(F("UART frame overflow"));
+        while (espLink.available() > 0 && espLink.read() != '\n') {}
+      }
+    }
+  }
+
+  if (bridgeLineLength > 0 &&
+      millis() - bridgeLastByteAtMs >= BRIDGE_FRAME_TIMEOUT_MS) {
+    bridgeProtocolFault(F("UART frame timeout"));
   }
 }
 
@@ -532,6 +921,22 @@ void serviceSerialCommands() {
         break;
       case '4':
         requestManualPulse(MIXER_REVERSE);
+        break;
+      case 'e':
+      case 'E':
+        requestManualPulse(PRESSER_EXTEND);
+        break;
+      case 't':
+      case 'T':
+        requestManualPulse(PRESSER_RETRACT);
+        break;
+      case 'f':
+      case 'F':
+        requestManualPulse(PUSHER_FORWARD);
+        break;
+      case 'b':
+      case 'B':
+        requestManualPulse(PUSHER_REVERSE);
         break;
       case '5':
         moveMolder(MOLDER_OPEN_ANGLE, F("OPEN"));
@@ -604,6 +1009,10 @@ void setup() {
   digitalWrite(SHREDDER_LPWM, LOW);
   digitalWrite(MIXER_RPWM, LOW);
   digitalWrite(MIXER_LPWM, LOW);
+  digitalWrite(PRESSER_RPWM, LOW);
+  digitalWrite(PRESSER_LPWM, LOW);
+  digitalWrite(PUSHER_IN3, LOW);
+  digitalWrite(PUSHER_IN4, LOW);
   digitalWrite(MIXER_GATE_SERVO_PIN, LOW);
   digitalWrite(MOLDER_SERVO_PIN, LOW);
 
@@ -611,6 +1020,10 @@ void setup() {
   pinMode(SHREDDER_LPWM, OUTPUT);
   pinMode(MIXER_RPWM, OUTPUT);
   pinMode(MIXER_LPWM, OUTPUT);
+  pinMode(PRESSER_RPWM, OUTPUT);
+  pinMode(PRESSER_LPWM, OUTPUT);
+  pinMode(PUSHER_IN3, OUTPUT);
+  pinMode(PUSHER_IN4, OUTPUT);
   pinMode(MIXER_GATE_SERVO_PIN, OUTPUT);
   pinMode(MOLDER_SERVO_PIN, OUTPUT);
   stopAllMotors(false);
@@ -618,14 +1031,19 @@ void setup() {
   releaseMolderServo(false);
 
   Serial.begin(115200);
+  espLink.begin(ESP_LINK_BAUD);
   delay(500);
   printHelp();
+  emitEvent(F("CONTROLLER_READY"), F("info"), F("controller"), F("stopped"),
+            F("Controller ready"));
 }
 
 void loop() {
+  serviceBridgeCommands();
   serviceMotorState();
   serviceAutomaticProcess();
   serviceSerialCommands();
+  serviceBridgeCommands();
   serviceMotorState();
   serviceAutomaticProcess();
 }

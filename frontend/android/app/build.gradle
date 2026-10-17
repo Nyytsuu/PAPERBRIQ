@@ -2,6 +2,12 @@ plugins {
     id "com.android.application"
 }
 
+def defaultPaperbriqApiBaseUrl = "https://paperbriq.onrender.com"
+def paperbriqApiBaseUrl = System.getenv("PAPERBRIQ_API_BASE_URL") ?: (project.findProperty("PAPERBRIQ_API_BASE_URL") ?: defaultPaperbriqApiBaseUrl)
+def escapedPaperbriqApiBaseUrl = paperbriqApiBaseUrl
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 android {
     namespace "com.paperbriq.app"
     compileSdk 35
@@ -10,8 +16,13 @@ android {
         applicationId "com.paperbriq.app"
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        versionCode 3
+        versionName "1.2"
+        buildConfigField "String", "PAPERBRIQ_API_BASE_URL", "\"${escapedPaperbriqApiBaseUrl}\""
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     compileOptions {

@@ -16,7 +16,9 @@ function createServer() {
 
       serveStatic(req, res, requestUrl);
     } catch (error) {
-      sendJson(res, 500, { error: "Unexpected server error", detail: error.message });
+      const status = Number(error?.statusCode || 500);
+      if (status >= 500) console.error("Unexpected server error", error);
+      sendJson(res, status, { error: error?.publicMessage || "Unexpected server error" });
     }
   });
 }

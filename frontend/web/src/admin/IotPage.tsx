@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { DataRow, NetworkTile, Panel, SensorLineChart } from "../components/ui";
 import { formatSensorValue } from "../api/format";
 import { connectLiveStream } from "../api/liveStream";
+import MachineControls from "../components/MachineControls";
 
 export default function IotPage() {
   const [iotData, setIotData] = useState(null);
@@ -61,6 +62,8 @@ export default function IotPage() {
 
   return (
     <section className="iot-page">
+      <MachineControls />
+
       <Panel
         title="IoT Monitoring"
         subtitle="Live machine telemetry from the PaperBriq station."
@@ -93,7 +96,7 @@ export default function IotPage() {
               </div>
               <strong>{formatSensorValue(sensor)}</strong>
               <SensorLineChart label={sensor.name} values={sensor.trend || []} />
-              <p>{sensor.delta > 0 ? "+" : ""}{sensor.delta ?? 0} since last sample - {sensor.updatedAt}</p>
+              <p>{sensor.delta === null || sensor.delta === undefined ? "No live sample" : `${sensor.delta > 0 ? "+" : ""}${sensor.delta} since last sample`} - {sensor.updatedAt}</p>
             </article>
           ))}
         </div>

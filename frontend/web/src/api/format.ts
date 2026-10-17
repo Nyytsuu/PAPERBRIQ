@@ -1,5 +1,5 @@
 export function formatSensorValue(sensor) {
-  if (!sensor) return "--";
+  if (!sensor || sensor.value === null || sensor.value === undefined) return "--";
   return `${formatNumber(sensor.value)} ${sensor.unit || ""}`.trim();
 }
 

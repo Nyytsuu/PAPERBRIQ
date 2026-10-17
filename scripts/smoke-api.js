@@ -2,11 +2,18 @@ const { loadEnvFile } = require("../backend/src/config/env");
 
 loadEnvFile();
 
+process.env.REMOTE_CONTROL_ENABLED = "true";
+process.env.CONTROL_API_KEY = process.env.CONTROL_API_KEY || "smoke-control-key";
+process.env.IOT_API_KEY = process.env.IOT_API_KEY || "smoke-iot-key";
+
 const { getDatabaseClient, parseMysqlDatabaseUrl } = require("../backend/src/config/database");
 const { createServer } = require("../backend/src/server/createServer");
 const { dataStore } = require("../backend/src/db");
 
 const marker = `smoke-${Date.now()}`;
+const smokeDeviceId = `${marker}-device`;
+const controlHeaders = { "X-Control-Key": process.env.CONTROL_API_KEY };
+const iotHeaders = { "X-API-Key": process.env.IOT_API_KEY };
 const server = createServer();
 
 function listen() {
@@ -15,10 +22,13 @@ function listen() {
   });
 }
 
-async function request(baseUrl, method, path, body, expectedStatus) {
+async function request(baseUrl, method, path, body, expectedStatus, headers = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...headers
+    },
     body: body ? JSON.stringify(body) : undefined
   });
   const text = await response.text();
@@ -71,9 +81,36 @@ async function cleanupMysql() {
   await ignoreMissing("DELETE FROM reward_redemptions WHERE contributor_email = ?", [`${marker}@example.test`]);
   await ignoreMissing("DELETE FROM rewards WHERE reward_name = ?", [`Smoke Reward ${marker}`]);
   await ignoreMissing("DELETE FROM process_actions WHERE payload LIKE ?", [`%${marker}%`]);
+  await ignoreMissing("DELETE FROM device_events WHERE device_id = ?", [smokeDeviceId]);
+  await ignoreMissing("DELETE FROM device_commands WHERE device_id = ?", [smokeDeviceId]);
+  await ignoreMissing("DELETE FROM device_control_presence WHERE device_id = ?", [smokeDeviceId]);
   await ignoreMissing("DELETE FROM contributors WHERE display_name = ? AND barangay = ?", ["Smoke Test Signup", marker]);
   await ignoreMissing("DELETE FROM app_users WHERE email = ?", [`staff-${marker}@example.test`]);
   await ignoreMissing("DELETE FROM app_users WHERE email = ?", [`${marker}@example.test`]);
+  await pool.end();
+}
+
+async function cleanupPostgres() {
+  if (getDatabaseClient() !== "postgres" || !process.env.DATABASE_URL) return;
+
+  let Pool;
+  try {
+    Pool = require("pg").Pool;
+  } catch (error) {
+    return;
+  }
+
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const ignoreMissing = async (sql, params) => {
+    try {
+      await pool.query(sql, params);
+    } catch (error) {
+      if (error.code !== "42P01") throw error;
+    }
+  };
+  await ignoreMissing("DELETE FROM device_events WHERE device_id = $1", [smokeDeviceId]);
+  await ignoreMissing("DELETE FROM device_commands WHERE device_id = $1", [smokeDeviceId]);
+  await ignoreMissing("DELETE FROM device_control_presence WHERE device_id = $1", [smokeDeviceId]);
   await pool.end();
 }
 
@@ -186,13 +223,139 @@ async function main() {
     if (!dashboard.generatedAt || !dashboard.summary?.generatedAt || typeof dashboard.overallProgress !== "number") {
       throw new Error("/api/dashboard did not include live dashboard metadata.");
     }
+    if (dashboard.systemStatus?.status !== "Offline" || dashboard.systemStatus?.temperatureC !== null ||
+        dashboard.systemStatus?.humidityPercent !== null) {
+      throw new Error("/api/dashboard exposed simulated sensor values before ESP32 telemetry was received.");
+    }
     results.push("/api/dashboard:ok");
 
     const iot = await request(baseUrl, "GET", "/api/iot", null, 200);
     if (!iot.generatedAt || !iot.sensors?.some((sensor) => Array.isArray(sensor.trend))) {
       throw new Error("/api/iot did not include live telemetry metadata.");
     }
+    if (iot.machine?.state !== "Offline" || iot.sensors.some((sensor) => sensor.value !== null)) {
+      throw new Error("/api/iot exposed simulated values before ESP32 telemetry was received.");
+    }
     results.push("/api/iot:ok");
+
+    await request(baseUrl, "POST", "/api/device/commands", {
+      deviceId: smokeDeviceId,
+      command: "start"
+    }, 401);
+    await request(baseUrl, "POST", "/api/device/commands", {
+      deviceId: smokeDeviceId,
+      command: "launch"
+    }, 400, controlHeaders);
+
+    const commandHeaders = { ...controlHeaders, "Idempotency-Key": `${marker}-start` };
+    const createdCommand = await request(baseUrl, "POST", "/api/device/commands", {
+      deviceId: smokeDeviceId,
+      command: "start"
+    }, 201, commandHeaders);
+    const retriedCommand = await request(baseUrl, "POST", "/api/device/commands", {
+      deviceId: smokeDeviceId,
+      command: "start"
+    }, 201, commandHeaders);
+    if (createdCommand.command.id !== retriedCommand.command.id || createdCommand.command.status !== "queued") {
+      throw new Error("Device command idempotency did not return the original queued command.");
+    }
+    results.push("device-command-create:ok");
+
+    await request(
+      baseUrl,
+      "GET",
+      `/api/device/commands/next?deviceId=${encodeURIComponent(smokeDeviceId)}`,
+      null,
+      401
+    );
+    const nextCommand = await request(
+      baseUrl,
+      "GET",
+      `/api/device/commands/next?deviceId=${encodeURIComponent(smokeDeviceId)}`,
+      null,
+      200,
+      iotHeaders
+    );
+    if (nextCommand.command?.id !== createdCommand.command.id) {
+      throw new Error("Device did not receive its oldest queued command.");
+    }
+    results.push("device-command-next:ok");
+
+    const delivered = await request(
+      baseUrl,
+      "POST",
+      `/api/device/commands/${createdCommand.command.id}/ack`,
+      { deviceId: smokeDeviceId, status: "delivered", message: "Received by smoke device" },
+      200,
+      iotHeaders
+    );
+    const deliveredAgain = await request(
+      baseUrl,
+      "POST",
+      `/api/device/commands/${createdCommand.command.id}/ack`,
+      { deviceId: smokeDeviceId, status: "delivered", message: "Duplicate delivery" },
+      200,
+      iotHeaders
+    );
+    if (delivered.command.status !== "delivered" || deliveredAgain.command.message !== delivered.command.message) {
+      throw new Error("Duplicate delivered acknowledgement was not idempotent.");
+    }
+    const completed = await request(
+      baseUrl,
+      "POST",
+      `/api/device/commands/${createdCommand.command.id}/ack`,
+      { deviceId: smokeDeviceId, status: "completed", message: "Started" },
+      200,
+      iotHeaders
+    );
+    if (completed.command.status !== "completed") {
+      throw new Error("Device command did not reach completed status.");
+    }
+    await request(
+      baseUrl,
+      "POST",
+      `/api/device/commands/${createdCommand.command.id}/ack`,
+      { deviceId: smokeDeviceId, status: "delivered" },
+      409,
+      iotHeaders
+    );
+    results.push("device-command-ack:ok");
+
+    await request(baseUrl, "POST", "/api/device/events", {
+      deviceId: smokeDeviceId,
+      type: "process_started",
+      message: "Unauthorized smoke event"
+    }, 401);
+    const eventBody = {
+      deviceId: smokeDeviceId,
+      eventId: `${marker}-process-started`,
+      type: "process_started",
+      severity: "info",
+      component: "machine",
+      message: "PaperBriq process started",
+      processState: "running",
+      commandId: createdCommand.command.id,
+      metadata: { source: "smoke-api" }
+    };
+    const createdEvent = await request(baseUrl, "POST", "/api/device/events", eventBody, 202, iotHeaders);
+    const retriedEvent = await request(baseUrl, "POST", "/api/device/events", eventBody, 202, iotHeaders);
+    if (createdEvent.event.id !== retriedEvent.event.id) {
+      throw new Error("Device event idempotency did not return the original event.");
+    }
+    results.push("device-event:ok");
+
+    const controlStatus = await request(
+      baseUrl,
+      "GET",
+      `/api/device/control-status?deviceId=${encodeURIComponent(smokeDeviceId)}`,
+      null,
+      200
+    );
+    if (!controlStatus.enabled || !controlStatus.configured || !controlStatus.device?.connected ||
+        controlStatus.processState !== "running" || !controlStatus.commands?.length || !controlStatus.events?.length) {
+      throw new Error("Device control status did not include enabled, connected command/event state.");
+    }
+    results.push("device-control-status:ok");
 
     const liveSnapshot = await requestText(baseUrl, "/api/live?channels=dashboard,reports,iot&once=1", 200, "event: snapshot");
     if (!liveSnapshot.includes('"dashboard"') || !liveSnapshot.includes('"reports"') || !liveSnapshot.includes('"iot"')) {
@@ -232,6 +395,7 @@ async function main() {
     results.push("access-request:ok");
 
     await cleanupMysql();
+    await cleanupPostgres();
     results.push("cleanup:ok");
     console.log(results.join("\n"));
   } finally {
@@ -255,6 +419,7 @@ async function shutdown() {
 }
 
 main().catch((error) => {
-  console.error(error.message);
+  console.error(error.stack || error.message);
+  if (error.cause) console.error("Cause:", error.cause);
   process.exit(1);
 });

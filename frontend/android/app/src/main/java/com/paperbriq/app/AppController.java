@@ -2,12 +2,21 @@ package com.paperbriq.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.Manifest;
+import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Build;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -33,10 +42,16 @@ import com.paperbriq.app.ui.LoginScreen;
 import com.paperbriq.app.ui.Ui;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -45,6 +60,9 @@ public class AppController {
     private static final String PREF_USER = "user";
     private static final String PREF_SUMMARY = "summary";
     private static final long LIVE_UPDATE_MS = 5000L;
+    private static final String DEVICE_ID = "paperbriq-esp32";
+    private static final String EVENT_CHANNEL_ID = "paperbriq_machine_events";
+    private static final String ERROR_CHANNEL_ID = "paperbriq_machine_errors";
 
     private final Activity activity;
     private final ApiClient apiClient;
@@ -53,6 +71,10 @@ public class AppController {
     private final Ui ui;
     private final SharedPreferences preferences;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Set<String> seenDeviceEventIds = new HashSet<>();
+    private String controlKey = "";
+    private boolean deviceEventsInitialized = false;
+    private boolean commandSubmitting = false;
     private boolean liveUpdatesStarted = false;
     private final Runnable liveUpdater = new Runnable() {
         @Override
@@ -71,6 +93,7 @@ public class AppController {
         this.apiClient = new ApiClient();
         this.ui = new Ui(activity);
         this.preferences = activity.getSharedPreferences(PREFS_NAME, Activity.MODE_PRIVATE);
+        createNotificationChannels();
     }
 
     public Activity activity() {
@@ -135,8 +158,43 @@ public class AppController {
         executor.execute(() -> {
             try {
                 JSONObject payload = apiClient.getJson(endpoint);
+                JSONObject controlStatus = null;
+                JSONObject backendHealth = null;
+                JSONObject dashboardIot = null;
+                try {
+                    backendHealth = apiClient.getJson("/api/health");
+                } catch (Exception ignored) {
+                    backendHealth = new JSONObject();
+                }
+                if (canControlMachine()) {
+                    try {
+                        controlStatus = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                    } catch (Exception controlError) {
+                        controlStatus = new JSONObject();
+                        controlStatus.put("enabled", false);
+                        controlStatus.put("error", controlError.getMessage());
+                    }
+                }
+                if ("dashboard".equals(pageKey)) {
+                    try {
+                        dashboardIot = apiClient.getJson("/api/iot");
+                    } catch (Exception ignored) {
+                        dashboardIot = new JSONObject();
+                    }
+                }
                 session.putPagePayload(pageKey, payload);
+                session.putPagePayload("backendHealth", backendHealth);
+                if (controlStatus != null) {
+                    session.putPagePayload("deviceControl", controlStatus);
+                }
+                if (dashboardIot != null) {
+                    session.putPagePayload("iot", dashboardIot);
+                }
+                final JSONObject nextControlStatus = controlStatus;
                 activity.runOnUiThread(() -> {
+                    if (nextControlStatus != null) {
+                        processDeviceEvents(nextControlStatus);
+                    }
                     if (pageKey.equals(session.currentPage)) {
                         renderPage(pageKey, true);
                     }
@@ -218,6 +276,9 @@ public class AppController {
     public void logout() {
         clearSavedSession();
         session.clear();
+        controlKey = "";
+        seenDeviceEventIds.clear();
+        deviceEventsInitialized = false;
         Toast.makeText(activity, "Logged out.", Toast.LENGTH_SHORT).show();
         showLogin();
     }
@@ -343,19 +404,91 @@ public class AppController {
         });
     }
 
-    public void createProcessAction(String action) {
+    public boolean canControlMachine() {
+        if (session.user == null) return false;
+        String role = session.user.optString("role", "");
+        return "admin".equals(role) || "barangay_staff".equals(role);
+    }
+
+    public boolean hasControlKey() {
+        return !controlKey.trim().isEmpty();
+    }
+
+    public void showControlKeyDialog(Runnable afterSaved) {
+        EditText input = ui.editText("Operator control key", true);
+        input.setText(controlKey);
+
+        AlertDialog dialog = new AlertDialog.Builder(activity)
+            .setTitle("Machine control key")
+            .setMessage("Enter the CONTROL_API_KEY configured on Render. It is kept only until this app closes or you log out.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Use key", null)
+            .create();
+
+        dialog.setOnShowListener(openDialog -> {
+            styleDialogButtons(dialog);
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                String nextKey = input.getText().toString().trim();
+                if (nextKey.isEmpty()) {
+                    input.setError("Control key is required");
+                    return;
+                }
+                controlKey = nextKey;
+                dialog.dismiss();
+                Toast.makeText(activity, "Control key ready for this session.", Toast.LENGTH_SHORT).show();
+                if (afterSaved != null) afterSaved.run();
+                if ("process".equals(session.currentPage)) renderPage("process", true);
+            });
+        });
+        dialog.show();
+    }
+
+    public void sendDeviceCommand(String command) {
+        String normalized = String.valueOf(command).trim().toLowerCase(Locale.ROOT);
+        if (!canControlMachine()) {
+            Toast.makeText(activity, "Only administrators and barangay staff can control the machine.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized))) {
+            Toast.makeText(activity, "Unsupported machine command.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!hasControlKey()) {
+            showControlKeyDialog(() -> sendDeviceCommand(normalized));
+            return;
+        }
+        if (commandSubmitting) {
+            Toast.makeText(activity, "A machine command is already being submitted.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        commandSubmitting = true;
         executor.execute(() -> {
             try {
                 JSONObject payload = new JSONObject();
-                payload.put("action", action);
+                payload.put("deviceId", DEVICE_ID);
+                payload.put("command", normalized);
                 payload.put("source", "android");
-                apiClient.postJson("/api/process/actions", payload);
+                if (session.user != null) {
+                    payload.put("issuedBy", session.user.optString("email", session.user.optString("fullName", "android-operator")));
+                }
+                Map<String, String> headers = new HashMap<>();
+                headers.put("X-Control-Key", controlKey);
+                JSONObject response = apiClient.postJson("/api/device/commands", payload, headers);
+                JSONObject queued = response.optJSONObject("command");
+                String status = queued != null ? queued.optString("status", "pending") : "pending";
                 activity.runOnUiThread(() -> {
-                    Toast.makeText(activity, "Process action recorded.", Toast.LENGTH_SHORT).show();
-                    showPage("process");
+                    commandSubmitting = false;
+                    String label = "stop".equals(normalized) ? "Software Stop" : capitalize(normalized);
+                    Toast.makeText(activity, label + " queued (" + status + "). Waiting for the device acknowledgement.", Toast.LENGTH_LONG).show();
+                    loadPagePayload("process", true);
                 });
             } catch (Exception error) {
-                activity.runOnUiThread(() -> Toast.makeText(activity, error.getMessage(), Toast.LENGTH_LONG).show());
+                activity.runOnUiThread(() -> {
+                    commandSubmitting = false;
+                    Toast.makeText(activity, error.getMessage(), Toast.LENGTH_LONG).show();
+                });
             }
         });
     }
@@ -669,6 +802,119 @@ public class AppController {
                 activity.runOnUiThread(() -> Toast.makeText(activity, error.getMessage(), Toast.LENGTH_LONG).show());
             }
         });
+    }
+
+    private void processDeviceEvents(JSONObject controlStatus) {
+        JSONArray events = controlStatus.optJSONArray("events");
+        if (events == null) return;
+
+        if (!deviceEventsInitialized) {
+            for (int index = 0; index < events.length(); index++) {
+                JSONObject event = events.optJSONObject(index);
+                if (event != null) seenDeviceEventIds.add(deviceEventId(event, index));
+            }
+            deviceEventsInitialized = true;
+            return;
+        }
+
+        for (int index = events.length() - 1; index >= 0; index--) {
+            JSONObject event = events.optJSONObject(index);
+            if (event == null) continue;
+            String eventId = deviceEventId(event, index);
+            if (!seenDeviceEventIds.add(eventId) || !shouldNotifyForEvent(event)) continue;
+
+            String eventType = firstNonBlank(event.optString("type"), event.optString("eventType"), event.optString("event_type"), "MACHINE_EVENT");
+            String severity = event.optString("severity", "info").toLowerCase(Locale.ROOT);
+            String message = firstNonBlank(event.optString("message"), eventType.replace('_', ' '));
+            String title = eventTitle(eventType, severity);
+            boolean isError = "error".equals(severity) || "critical".equals(severity) || eventType.contains("FAULT");
+
+            postMachineNotification(eventId, title, message, isError);
+            if (isError) {
+                if (!activity.isFinishing()) showInfoDialog(title, message);
+            } else {
+                Toast.makeText(activity, title + ": " + message, Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private boolean shouldNotifyForEvent(JSONObject event) {
+        String eventType = firstNonBlank(event.optString("type"), event.optString("eventType"), event.optString("event_type"), "").toUpperCase(Locale.ROOT);
+        String severity = event.optString("severity", "info").toLowerCase(Locale.ROOT);
+        return eventType.contains("MIXER") || eventType.contains("PROCESS") || eventType.contains("FAULT") ||
+            "warning".equals(severity) || "error".equals(severity) || "critical".equals(severity);
+    }
+
+    private String deviceEventId(JSONObject event, int fallbackIndex) {
+        return firstNonBlank(
+            event.optString("id"),
+            event.optString("eventId"),
+            event.optString("event_id"),
+            firstNonBlank(event.optString("type"), event.optString("eventType"), event.optString("event_type"), "event") + ":" +
+                firstNonBlank(event.optString("createdAt"), event.optString("created_at"), String.valueOf(fallbackIndex))
+        );
+    }
+
+    private String eventTitle(String eventType, String severity) {
+        String normalized = String.valueOf(eventType).toUpperCase(Locale.ROOT);
+        if (normalized.contains("MIXER_STARTED")) return "Mixer started";
+        if (normalized.contains("MIXER_COMPLETED")) return "Mixer completed";
+        if (normalized.contains("PROCESS_STARTED")) return "Process started";
+        if (normalized.contains("PROCESS_COMPLETED")) return "Process completed";
+        if (normalized.contains("STOPPED")) return "Machine stopped";
+        if (normalized.contains("FAULT") || "error".equals(severity) || "critical".equals(severity)) return "Machine error";
+        return "PaperBriq update";
+    }
+
+    private void createNotificationChannels() {
+        NotificationManager manager = (NotificationManager) activity.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        NotificationChannel events = new NotificationChannel(EVENT_CHANNEL_ID, "Machine events", NotificationManager.IMPORTANCE_DEFAULT);
+        events.setDescription("Mixer and PaperBriq process updates");
+        NotificationChannel errors = new NotificationChannel(ERROR_CHANNEL_ID, "Machine errors", NotificationManager.IMPORTANCE_HIGH);
+        errors.setDescription("PaperBriq faults that require attention");
+        manager.createNotificationChannel(events);
+        manager.createNotificationChannel(errors);
+    }
+
+    private void postMachineNotification(String eventId, String title, String message, boolean isError) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        NotificationManager manager = (NotificationManager) activity.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        Intent intent = new Intent(activity, MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+            activity,
+            Math.abs(eventId.hashCode()),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+        Notification notification = new Notification.Builder(activity, isError ? ERROR_CHANNEL_ID : EVENT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_paperbriq)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setStyle(new Notification.BigTextStyle().bigText(message))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setCategory(isError ? Notification.CATEGORY_ERROR : Notification.CATEGORY_STATUS)
+            .build();
+        manager.notify(Math.abs(eventId.hashCode()), notification);
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) return value.trim();
+        }
+        return "";
+    }
+
+    private String capitalize(String value) {
+        String clean = String.valueOf(value).trim();
+        if (clean.isEmpty()) return clean;
+        return clean.substring(0, 1).toUpperCase(Locale.ROOT) + clean.substring(1);
     }
 
     public void destroy() {
