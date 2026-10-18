@@ -564,11 +564,15 @@ void serviceUnoLink() {
     const char c = static_cast<char>(unoLink.read());
     if (c == '\n') {
       unoLine.trim();
-      if (unoLine.startsWith("ACK|")) handleUnoAck(unoLine);
-      else if (unoLine.startsWith("EVENT|")) handleUnoEvent(unoLine);
-      else if (unoLine.length() > 0) {
-        Serial.print("Uno: ");
+      if (unoLine.length() > 0) {
+        // Keep the UART link observable in the USB Serial Monitor. Previously
+        // valid ACK/EVENT frames were handled silently, which made a working
+        // Uno-to-ESP connection look disconnected during troubleshooting.
+        Serial.print("Uno RX: ");
         Serial.println(unoLine);
+
+        if (unoLine.startsWith("ACK|")) handleUnoAck(unoLine);
+        else if (unoLine.startsWith("EVENT|")) handleUnoEvent(unoLine);
       }
       unoLine = "";
     } else if (c != '\r') {

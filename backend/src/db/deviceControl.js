@@ -64,25 +64,43 @@ function canAcknowledge(currentStatus, nextStatus) {
   return false;
 }
 
-function inferProcessState(events, commands) {
-  const eventState = events.find((event) => event.processState)?.processState;
-  if (eventState) return eventState;
+function commandProcessState(command) {
+  if (!command) return "idle";
+  if (command.status === "failed") return "fault";
+  if (command.status === "expired") return "idle";
 
-  const latest = commands[0];
-  if (!latest) return "idle";
-  if (latest.status === "failed") return "fault";
-  if (latest.status === "expired") return "idle";
-
-  if (latest.command === "start") {
-    return latest.status === "completed" ? "running" : "starting";
+  if (command.command === "start") {
+    return command.status === "completed" ? "running" : "starting";
   }
-  if (latest.command === "stop") {
-    return latest.status === "completed" ? "stopped" : "stopping";
+  if (command.command === "stop") {
+    return command.status === "completed" ? "stopped" : "stopping";
   }
-  if (latest.command === "reset") {
-    return latest.status === "completed" ? "idle" : "resetting";
+  if (command.command === "reset") {
+    return command.status === "completed" ? "idle" : "resetting";
   }
   return "idle";
+}
+
+function timeValue(value) {
+  const parsed = value ? new Date(value).getTime() : Number.NaN;
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+function inferProcessState(events, commands) {
+  const latestStateEvent = events.find((event) => event.processState);
+  const latest = commands[0];
+  if (!latestStateEvent) return commandProcessState(latest);
+  if (!latest) return latestStateEvent.processState;
+
+  // A completed command can be newer than the most recently stored event.
+  // In particular, a successful RESET must supersede an older fault even if
+  // its optional ARMED event is delayed or lost on the UART/network path.
+  const commandAt = timeValue(
+    latest.completedAt || latest.deliveredAt || latest.createdAt
+  );
+  const eventAt = timeValue(latestStateEvent.createdAt);
+  if (commandAt >= eventAt) return commandProcessState(latest);
+  return latestStateEvent.processState;
 }
 
 function publicStoreError(statusCode, publicMessage) {

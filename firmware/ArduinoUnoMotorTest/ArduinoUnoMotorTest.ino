@@ -26,7 +26,7 @@ const uint8_t PUSHER_IN4 = 12;
 // digital pins 16/17. A2 receives the ESP32's 3.3 V TX directly. A3
 // transmits 5 V and MUST pass through a level shifter or resistor divider.
 const uint8_t ESP_LINK_RX = A2;
-const uint8_t ESP_LINK_TX = A3;
+const uint8_t ESP_LINK_TX = A4;
 const unsigned long ESP_LINK_BAUD = 9600;
 SoftwareSerial espLink(ESP_LINK_RX, ESP_LINK_TX);
 
@@ -1030,7 +1030,7 @@ void setup() {
   releaseMixerGateServo(false);
   releaseMolderServo(false);
 
-  Serial.begin(115200);
+  Serial.begin(9600);
   espLink.begin(ESP_LINK_BAUD);
   delay(500);
   printHelp();
