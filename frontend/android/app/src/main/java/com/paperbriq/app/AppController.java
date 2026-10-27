@@ -17,6 +17,7 @@ import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -60,6 +61,7 @@ public class AppController {
     private static final String PREF_USER = "user";
     private static final String PREF_SUMMARY = "summary";
     private static final long LIVE_UPDATE_MS = 5000L;
+    private static final long MACHINE_CHECK_VALID_MS = 5 * 60 * 1000L;
     private static final String DEVICE_ID = "paperbriq-esp32";
     private static final String EVENT_CHANNEL_ID = "paperbriq_machine_events";
     private static final String ERROR_CHANNEL_ID = "paperbriq_machine_errors";
@@ -75,6 +77,10 @@ public class AppController {
     private String controlKey = "";
     private boolean deviceEventsInitialized = false;
     private boolean commandSubmitting = false;
+    private boolean machineCheckRunning = false;
+    private JSONObject machineChecks;
+    private long machineChecksReceivedAt;
+    private long machineCheckConfirmedAt;
     private boolean liveUpdatesStarted = false;
     private final Runnable liveUpdater = new Runnable() {
         @Override
@@ -140,14 +146,12 @@ public class AppController {
         }
 
         int previousScrollY = currentScroll.getScrollY();
-        ScrollView refreshedScroll = (ScrollView) new AppShell().create(this, pageKey);
-        View refreshedContent = refreshedScroll.getChildAt(0);
-        refreshedScroll.removeView(refreshedContent);
+        View refreshedContent = new AppShell().createContent(this, pageKey);
 
-        currentScroll.suppressLayout(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) currentScroll.suppressLayout(true);
         currentScroll.removeAllViews();
         currentScroll.addView(refreshedContent);
-        currentScroll.suppressLayout(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) currentScroll.suppressLayout(false);
         currentScroll.post(() -> currentScroll.scrollTo(0, previousScrollY));
     }
 
@@ -161,13 +165,16 @@ public class AppController {
                 JSONObject controlStatus = null;
                 JSONObject backendHealth = null;
                 JSONObject dashboardIot = null;
+                long controlRequestedAt = SystemClock.elapsedRealtime();
                 try {
                     backendHealth = apiClient.getJson("/api/health");
                 } catch (Exception ignored) {
                     backendHealth = new JSONObject();
                 }
-                if (canControlMachine()) {
+                // Monitoring is read-only and must also work for non-operator accounts.
+                {
                     try {
+                        controlRequestedAt = SystemClock.elapsedRealtime();
                         controlStatus = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
                     } catch (Exception controlError) {
                         controlStatus = new JSONObject();
@@ -191,8 +198,10 @@ public class AppController {
                     session.putPagePayload("iot", dashboardIot);
                 }
                 final JSONObject nextControlStatus = controlStatus;
+                final long requestedAt = controlRequestedAt;
                 activity.runOnUiThread(() -> {
                     if (nextControlStatus != null) {
+                        acceptMachineChecks(nextControlStatus, requestedAt);
                         processDeviceEvents(nextControlStatus);
                     }
                     if (pageKey.equals(session.currentPage)) {
@@ -201,6 +210,9 @@ public class AppController {
                 });
             } catch (Exception error) {
                 activity.runOnUiThread(() -> {
+                    machineChecks = null;
+                    clearMachineCheck();
+                    if ("process".equals(session.currentPage)) renderPage("process", true);
                     if (!silent && pageKey.equals(session.currentPage)) {
                         Toast.makeText(activity, error.getMessage(), Toast.LENGTH_LONG).show();
                     }
@@ -280,6 +292,8 @@ public class AppController {
         session.clear();
         controlKey = "";
         seenDeviceEventIds.clear();
+        clearMachineCheck();
+        machineChecks = null;
         deviceEventsInitialized = false;
         Toast.makeText(activity, "Logged out.", Toast.LENGTH_SHORT).show();
         showLogin();
@@ -416,13 +430,68 @@ public class AppController {
         return !controlKey.trim().isEmpty();
     }
 
+    private void acceptMachineChecks(JSONObject control, long requestedAt) {
+        machineChecks = control.optJSONObject("machineChecks");
+        // Count request time as part of the result's age, not additional validity.
+        machineChecksReceivedAt = requestedAt;
+    }
+
+    public JSONObject machineCheckResults() { return machineChecks; }
+
+    public boolean isMachineCheckRunning() { return machineCheckRunning; }
+
+    public boolean automaticMachineChecksReady() {
+        long now = SystemClock.elapsedRealtime();
+        return machineCheckConfirmedAt > 0 && now - machineCheckConfirmedAt < MACHINE_CHECK_VALID_MS
+            && machineChecks != null && machineChecks.optBoolean("passed", false)
+            && now - machineChecksReceivedAt < machineChecks.optLong("validForMs", 0);
+    }
+
+    public void checkMachine(Runnable showResults) {
+        if (!canControlMachine() || machineCheckRunning) return;
+        machineCheckRunning = true;
+        machineCheckConfirmedAt = 0;
+        machineChecks = null;
+        if ("process".equals(session.currentPage)) renderPage("process", true);
+        executor.execute(() -> {
+            long requestedAt = SystemClock.elapsedRealtime();
+            try {
+                JSONObject control = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                activity.runOnUiThread(() -> {
+                    machineCheckRunning = false;
+                    acceptMachineChecks(control, requestedAt);
+                    machineCheckConfirmedAt = SystemClock.elapsedRealtime();
+                    session.putPagePayload("deviceControl", control);
+                    if ("process".equals(session.currentPage)) {
+                        renderPage("process", true);
+                        showResults.run();
+                    }
+                });
+            } catch (Exception error) {
+                activity.runOnUiThread(() -> {
+                    machineCheckRunning = false;
+                    machineChecks = null;
+                    clearMachineCheck();
+                    if ("process".equals(session.currentPage)) {
+                        renderPage("process", true);
+                        showResults.run();
+                    }
+                });
+            }
+        });
+    }
+
+    private void clearMachineCheck() {
+        machineCheckConfirmedAt = 0;
+    }
+
     public void showControlKeyDialog(Runnable afterSaved) {
         EditText input = ui.editText("Operator control key", true);
         input.setText(controlKey);
 
         AlertDialog dialog = new AlertDialog.Builder(activity)
-            .setTitle("Machine control key")
-            .setMessage("Enter the CONTROL_API_KEY configured on Render. It is kept only until this app closes or you log out.")
+            .setTitle("Machine access setup")
+            .setMessage("Ask the machine administrator for the control key. Administrators can find it as CONTROL_API_KEY in Render. The key stays hidden and is kept only until this app closes or you log out.")
             .setView(input)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Use key", null)
@@ -452,8 +521,12 @@ public class AppController {
             Toast.makeText(activity, "Only administrators and barangay staff can control the machine.", Toast.LENGTH_LONG).show();
             return;
         }
-        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized))) {
+        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized) || "self_test".equals(normalized))) {
             Toast.makeText(activity, "Unsupported machine command.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (("start".equals(normalized) || "self_test".equals(normalized)) && !automaticMachineChecksReady()) {
+            Toast.makeText(activity, "Use Check machine and resolve failed connection or sensor checks before starting.", Toast.LENGTH_LONG).show();
             return;
         }
         if (!hasControlKey()) {
@@ -468,9 +541,23 @@ public class AppController {
         commandSubmitting = true;
         executor.execute(() -> {
             try {
+                if ("start".equals(normalized) || "self_test".equals(normalized)) {
+                    JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                    JSONObject checks = latest.optJSONObject("machineChecks");
+                    if (!latest.optBoolean("enabled", false) || checks == null || !checks.optBoolean("passed", false)
+                        || checks.optLong("validForMs", 0) <= 0
+                        || ("self_test".equals(normalized) && !checks.optBoolean("componentTestsSupported", false))) {
+                        activity.runOnUiThread(() -> {
+                            machineChecks = null;
+                            if ("process".equals(session.currentPage)) renderPage("process", true);
+                        });
+                        throw new IllegalStateException("Machine checks need attention. Use Check machine again before starting.");
+                    }
+                }
                 JSONObject payload = new JSONObject();
                 payload.put("deviceId", DEVICE_ID);
                 payload.put("command", normalized);
+                if ("self_test".equals(normalized)) payload.put("unloadedSupervised", true);
                 payload.put("source", "android");
                 if (session.user != null) {
                     payload.put("issuedBy", session.user.optString("email", session.user.optString("fullName", "android-operator")));
@@ -482,7 +569,8 @@ public class AppController {
                 String status = queued != null ? queued.optString("status", "pending") : "pending";
                 activity.runOnUiThread(() -> {
                     commandSubmitting = false;
-                    String label = "stop".equals(normalized) ? "Software Stop" : capitalize(normalized);
+                    clearMachineCheck();
+                    String label = "stop".equals(normalized) ? "Software Stop" : "self_test".equals(normalized) ? "Component tests" : capitalize(normalized);
                     Toast.makeText(activity, label + " queued (" + status + "). Waiting for the device acknowledgement.", Toast.LENGTH_LONG).show();
                     loadPagePayload("process", true);
                 });

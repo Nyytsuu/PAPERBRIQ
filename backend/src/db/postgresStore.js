@@ -265,6 +265,22 @@ function createPostgresStore(databaseUrl) {
       );
       return mapDeviceEvent(result.rows[0]);
     },
+    async recordMachineHealth(deviceId, health) {
+      await ensureControlSchema();
+      await pool.query(
+        `INSERT INTO device_machine_health (device_id, health, recorded_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (device_id) DO UPDATE SET health = EXCLUDED.health, recorded_at = EXCLUDED.recorded_at`,
+        [deviceId, JSON.stringify(health)]
+      );
+    },
+    async getMachineHealth(deviceId) {
+      await ensureControlSchema();
+      const result = await pool.query(
+        `SELECT health, recorded_at FROM device_machine_health WHERE device_id = $1`, [deviceId]
+      );
+      if (!result.rows.length) return null;
+      return { health: result.rows[0].health, recordedAt: new Date(result.rows[0].recorded_at).toISOString() };
+    },
     async getDeviceControlStatus(deviceId, onlineAfter) {
       await ensureControlSchema();
       await expirePostgresCommands(pool, new Date());
@@ -284,7 +300,7 @@ function createPostgresStore(databaseUrl) {
            FROM device_events
            WHERE device_id = $1
            ORDER BY created_at DESC, id DESC
-           LIMIT 20`,
+           LIMIT 60`,
           [deviceId]
         ),
         pool.query(
@@ -324,10 +340,17 @@ function createPostgresStore(databaseUrl) {
 
 async function ensureDeviceControlSchema(pool) {
   await pool.query(
+    `CREATE TABLE IF NOT EXISTS device_machine_health (
+       device_id VARCHAR(80) PRIMARY KEY,
+       health JSONB NOT NULL,
+       recorded_at TIMESTAMPTZ NOT NULL
+     )`
+  );
+  await pool.query(
     `CREATE TABLE IF NOT EXISTS device_commands (
        id UUID PRIMARY KEY,
        device_id VARCHAR(80) NOT NULL,
-       command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset')),
+       command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test')),
        status VARCHAR(20) NOT NULL DEFAULT 'queued'
          CHECK (status IN ('queued', 'delivered', 'completed', 'failed', 'expired')),
        idempotency_key VARCHAR(120),
@@ -339,6 +362,11 @@ async function ensureDeviceControlSchema(pool) {
        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
        UNIQUE (device_id, idempotency_key)
      )`
+  );
+  await pool.query(
+    `ALTER TABLE device_commands
+       DROP CONSTRAINT IF EXISTS device_commands_command_check,
+       ADD CONSTRAINT device_commands_command_check CHECK (command IN ('start', 'stop', 'reset', 'self_test'))`
   );
   await pool.query(
     `CREATE INDEX IF NOT EXISTS idx_device_command_queue

@@ -17,12 +17,12 @@ public class ReportsScreen implements AppScreen {
 
     @Override
     public String navLabel() {
-        return "Performance";
+        return "Reports";
     }
 
     @Override
     public String title() {
-        return "Performance Reports";
+        return "Reports";
     }
 
     @Override
@@ -40,8 +40,7 @@ public class ReportsScreen implements AppScreen {
         if (charts == null) charts = new JSONObject();
 
         ui.addGrid(root, new android.view.View[]{
-            ui.filterCard("Report Period", reports.optString("period", "Waiting for report records")),
-            ui.filterCard("Source", chartMeta != null ? chartMeta.optString("source", "MySQL") : "MySQL")
+            ui.filterCard("Report period", reports.optString("period", "Waiting for records"))
         }, 1);
         ui.addGrid(root, statCards(ui, reports.optJSONArray("cards")), 2);
 
@@ -54,18 +53,13 @@ public class ReportsScreen implements AppScreen {
 
         ui.addGrid(root, new android.view.View[]{
             ui.infoListCard("Top Barangays", barangayRows(reports.optJSONArray("topBarangays"), ui)),
-            ui.infoListCard("Environmental Impact", impactRows(reports.optJSONArray("impact"))),
-            ui.infoListCard("Report Summary", new String[][]{
-                {"Updated", reports.optString("displayTime", "--")},
-                {"Source", chartMeta != null ? chartMeta.optString("source", "MySQL") : "MySQL"},
-                {"Records", reports.optJSONArray("topBarangays") != null ? String.valueOf(reports.optJSONArray("topBarangays").length()) : "0"}
-            })
+            ui.infoListCard("Environmental Impact", impactRows(reports.optJSONArray("impact")))
         }, 1);
     }
 
     private android.view.View[] statCards(Ui ui, JSONArray cards) {
         if (cards == null || cards.length() == 0) {
-            return new android.view.View[]{ui.statCard("No report data", "--", "Waiting for MySQL records", AppColors.GREEN)};
+            return new android.view.View[]{ui.statCard("No report data", "--", "Waiting for records", AppColors.GREEN)};
         }
         android.view.View[] views = new android.view.View[cards.length()];
         for (int index = 0; index < cards.length(); index++) {

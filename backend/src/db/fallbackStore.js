@@ -17,6 +17,7 @@ function createFallbackStore() {
   const deviceCommands = [];
   const deviceEvents = [];
   const devicePresence = new Map();
+  const machineHealth = new Map();
 
   function touchDevice(deviceId) {
     devicePresence.set(deviceId, new Date().toISOString());
@@ -290,7 +291,7 @@ function createFallbackStore() {
         .map(mapDeviceCommand);
       const events = deviceEvents
         .filter((event) => event.deviceId === deviceId)
-        .slice(0, 20)
+        .slice(0, 60)
         .map(mapDeviceEvent);
       const lastSeenAt = devicePresence.get(deviceId) || null;
       return {
@@ -304,6 +305,12 @@ function createFallbackStore() {
         commands,
         events
       };
+    },
+    async recordMachineHealth(deviceId, health) {
+      machineHealth.set(deviceId, { health, recordedAt: new Date().toISOString() });
+    },
+    async getMachineHealth(deviceId) {
+      return machineHealth.get(deviceId) || null;
     },
     async getIotMonitoring() {
       return createLiveIotSnapshot(pageData.iot);

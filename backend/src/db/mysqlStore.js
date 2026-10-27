@@ -447,7 +447,7 @@ function createMysqlStore(databaseUrl) {
            FROM device_events
            WHERE device_id = ?
            ORDER BY created_at DESC, id DESC
-           LIMIT 20`,
+           LIMIT 60`,
           [deviceId]
         ),
         pool.execute(
@@ -503,6 +503,23 @@ function createMysqlStore(databaseUrl) {
 
         return buildIotSnapshot(sensors, devices, alerts, diagnostics, latestRun);
       }, () => buildIotSnapshot([], [], [], [], null));
+    },
+    async recordMachineHealth(deviceId, health) {
+      await ensureControlSchema();
+      await pool.execute(
+        `INSERT INTO device_machine_health (device_id, health, recorded_at) VALUES (?, ?, NOW(3))
+         ON DUPLICATE KEY UPDATE health = VALUES(health), recorded_at = VALUES(recorded_at)`,
+        [deviceId, JSON.stringify(health)]
+      );
+    },
+    async getMachineHealth(deviceId) {
+      await ensureControlSchema();
+      const [rows] = await pool.execute(
+        `SELECT health, recorded_at FROM device_machine_health WHERE device_id = ?`, [deviceId]
+      );
+      if (!rows.length) return null;
+      return { health: typeof rows[0].health === "string" ? JSON.parse(rows[0].health) : rows[0].health,
+        recordedAt: new Date(rows[0].recorded_at).toISOString() };
     },
     async recordIotTelemetry(telemetry) {
       const connection = await pool.getConnection();
@@ -1541,6 +1558,13 @@ function liveSensorStatus(name, value, fallbackStatus) {
 }
 
 async function ensureDeviceControlSchema(pool) {
+  await pool.execute(
+    `CREATE TABLE IF NOT EXISTS device_machine_health (
+       device_id VARCHAR(80) PRIMARY KEY,
+       health JSON NOT NULL,
+       recorded_at DATETIME(3) NOT NULL
+     ) ENGINE=InnoDB`
+  );
   await pool.execute(
     `CREATE TABLE IF NOT EXISTS device_commands (
        id CHAR(36) PRIMARY KEY,

@@ -46,6 +46,44 @@ public class PaperIconView extends View {
     }
 
     private void drawIcon(Canvas canvas) {
+        if (has("menu", "more")) {
+            canvas.drawCircle(5, 12, 1.6f, fill);
+            canvas.drawCircle(12, 12, 1.6f, fill);
+            canvas.drawCircle(19, 12, 1.6f, fill);
+            return;
+        }
+        if (has("arrow")) {
+            line(canvas, 5, 12, 19, 12);
+            line(canvas, 14, 7, 19, 12);
+            line(canvas, 14, 17, 19, 12);
+            return;
+        }
+        if (has("temperature")) {
+            Path tube = new Path();
+            tube.moveTo(9, 14);
+            tube.lineTo(9, 5);
+            tube.cubicTo(9, 1, 15, 1, 15, 5);
+            tube.lineTo(15, 14);
+            tube.cubicTo(20, 20, 4, 24, 9, 14);
+            canvas.drawPath(tube, stroke);
+            line(canvas, 12, 8, 12, 17);
+            canvas.drawCircle(12, 17.5f, 1.5f, fill);
+            line(canvas, 18, 6, 20, 6);
+            line(canvas, 18, 10, 20, 10);
+            return;
+        }
+        if (has("humidity")) {
+            Path drop = new Path();
+            drop.moveTo(12, 3);
+            drop.cubicTo(8, 8, 5, 12, 5, 15);
+            drop.cubicTo(5, 23, 19, 23, 19, 15);
+            drop.cubicTo(19, 12, 16, 8, 12, 3);
+            canvas.drawPath(drop, stroke);
+            line(canvas, 10, 17, 14, 12);
+            canvas.drawCircle(10, 12, 0.8f, fill);
+            canvas.drawCircle(14, 17, 0.8f, fill);
+            return;
+        }
         if (has("dashboard", "home", "overview")) {
             line(canvas, 4, 11, 12, 5);
             line(canvas, 12, 5, 20, 11);

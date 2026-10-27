@@ -69,7 +69,7 @@ function commandProcessState(command) {
   if (command.status === "failed") return "fault";
   if (command.status === "expired") return "idle";
 
-  if (command.command === "start") {
+  if (command.command === "start" || command.command === "self_test") {
     return command.status === "completed" ? "running" : "starting";
   }
   if (command.command === "stop") {

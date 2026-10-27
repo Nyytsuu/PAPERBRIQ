@@ -65,11 +65,9 @@ const pageData = {
       { name: "Temperature", value: 29.4, unit: "C", status: "Normal" },
       { name: "Humidity", value: 65, unit: "%RH", status: "Normal" },
       { name: "Rainwater Level", value: 78, unit: "%", status: "Normal" },
-      { name: "Battery Level", value: 92, unit: "%", status: "Good" },
       { name: "Power Output", value: 240, unit: "w", status: "Normal" },
       { name: "Water Flow Rate", value: 18.6, unit: "L/min", status: "Normal" },
-      { name: "System Pressure", value: 2.3, unit: "bar", status: "Normal" },
-      { name: "TDS Water Quality", value: 152, unit: "ppm", status: "Good" }
+      { name: "System Pressure", value: 2.3, unit: "bar", status: "Normal" }
     ],
     devices: [
       { name: "Motor Status", value: "ON", status: "Running" },

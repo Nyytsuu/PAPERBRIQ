@@ -20,6 +20,10 @@ public class AppSession {
 
     public void putPagePayload(String pageKey, JSONObject payload) {
         if (pageKey == null || payload == null) return;
+        if ("deviceControl".equals(pageKey) || "iot".equals(pageKey)) {
+            try { payload.put("_receivedAtElapsedMs", android.os.SystemClock.elapsedRealtime()); }
+            catch (org.json.JSONException ignored) { }
+        }
         pagePayloads.put(pageKey, payload);
         if ("dashboard".equals(pageKey)) {
             JSONObject nextSummary = payload.optJSONObject("summary");

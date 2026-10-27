@@ -1,6 +1,9 @@
 const { timingSafeEqual } = require("crypto");
 const { normalizeRole } = require("../config/roles");
 const { dataStore } = require("../db");
+const { normalizeMachineHealth, buildMachineChecks } = require("../db/machineChecks");
+const { buildMachineProcess } = require("../db/machineProcess");
+const { buildComponentTests } = require("../db/componentTests");
 const { readJson, sendJson } = require("./json");
 const { streamLive } = require("./liveStream");
 
@@ -35,8 +38,8 @@ async function routeApi(req, res, requestUrl) {
       sendJson(res, 400, { error: "A valid deviceId is required." });
       return;
     }
-    if (!new Set(["start", "stop", "reset"]).has(command)) {
-      sendJson(res, 400, { error: "command must be start, stop, or reset." });
+    if (!new Set(["start", "stop", "reset", "self_test"]).has(command)) {
+      sendJson(res, 400, { error: "command must be start, stop, reset, or self_test." });
       return;
     }
     if (req.headers["idempotency-key"] && !idempotencyKey) {
@@ -45,11 +48,19 @@ async function routeApi(req, res, requestUrl) {
     }
 
     try {
+      if (command === "self_test") {
+        const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
+        const checks = buildMachineChecks(await dataStore.getMachineHealth(deviceId), status);
+        if (body.unloadedSupervised !== true || !checks.passed || !checks.componentTestsSupported) {
+          sendJson(res, 409, { error: "Confirm unloaded supervision, close the door, Reset, and refresh machine checks before testing." });
+          return;
+        }
+      }
       const commandRecord = await dataStore.createDeviceCommand({
         deviceId,
         command,
         idempotencyKey,
-        ttlSeconds: deviceCommandTtlSeconds()
+        ttlSeconds: command === "self_test" ? 15 : deviceCommandTtlSeconds()
       });
       sendJson(res, 201, { command: commandRecord });
     } catch (error) {
@@ -146,6 +157,9 @@ async function routeApi(req, res, requestUrl) {
         enabled,
         configured,
         ...status,
+        processRun: buildMachineProcess(status),
+        componentTests: buildComponentTests(status),
+        machineChecks: buildMachineChecks(await dataStore.getMachineHealth(deviceId), status),
         generatedAt: new Date().toISOString()
       });
     } catch (error) {
@@ -391,7 +405,9 @@ async function routeApi(req, res, requestUrl) {
       return;
     }
 
-    sendJson(res, 202, { accepted: true, telemetry: await dataStore.recordIotTelemetry(telemetry) });
+    const stored = await dataStore.recordIotTelemetry(telemetry);
+    await dataStore.recordMachineHealth(telemetry.deviceId, normalizeMachineHealth(body.checks));
+    sendJson(res, 202, { accepted: true, telemetry: stored });
     return;
   }
 

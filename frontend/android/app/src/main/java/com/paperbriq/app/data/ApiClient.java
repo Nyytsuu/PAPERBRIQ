@@ -159,15 +159,8 @@ public class ApiClient {
     }
 
     private Exception backendConnectionError(Exception cause) {
-        if (!configuredApiBaseUrl.isEmpty()) {
-            return new Exception(
-                "Cannot connect to the PaperBriq Render backend at " + configuredApiBaseUrl +
-                    ". Check internet access and confirm /api/health is online.",
-                cause
-            );
-        }
         return new Exception(
-            "Cannot connect to PaperBriq backend. Start npm with 'npm start', then run 'npm run android:reverse -- 12889374AD000249' for a USB phone.",
+            "Cannot update PaperBriq. Check your internet connection and try again.",
             cause
         );
     }

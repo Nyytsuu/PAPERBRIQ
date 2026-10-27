@@ -58,7 +58,7 @@ public class LoginScreen {
         LinearLayout copy = ui.column();
         copy.setPadding(ui.dp(14), 0, 0, 0);
         copy.addView(ui.text("PAPERBRIQ", 38, AppColors.GREEN_DARK, Typeface.BOLD));
-        copy.addView(ui.text("LIVE MONITORING SYSTEM", 13, AppColors.GREEN, Typeface.BOLD));
+        copy.addView(ui.text("MONITORING SYSTEM", 13, AppColors.GREEN, Typeface.BOLD));
         lockup.addView(copy, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         hero.addView(lockup, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         return hero;
@@ -76,7 +76,7 @@ public class LoginScreen {
         LinearLayout headingText = ui.column();
         headingText.setPadding(ui.dp(12), 0, 0, 0);
         headingText.addView(ui.text("Monitor PaperBriq", 23, AppColors.INK, Typeface.BOLD));
-        headingText.addView(ui.text("Sign in for live machine and production data", 14, AppColors.MUTED, Typeface.NORMAL));
+        headingText.addView(ui.text("Sign in to monitor PaperBriq", 14, AppColors.MUTED, Typeface.NORMAL));
         heading.addView(headingText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         card.addView(heading);
 

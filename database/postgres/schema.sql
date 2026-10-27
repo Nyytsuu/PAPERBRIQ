@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE TABLE IF NOT EXISTS device_commands (
   id UUID PRIMARY KEY,
   device_id VARCHAR(80) NOT NULL,
-  command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset')),
+  command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test')),
   status VARCHAR(20) NOT NULL DEFAULT 'queued'
     CHECK (status IN ('queued', 'delivered', 'completed', 'failed', 'expired')),
   idempotency_key VARCHAR(120),

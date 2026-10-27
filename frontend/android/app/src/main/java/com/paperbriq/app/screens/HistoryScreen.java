@@ -17,12 +17,12 @@ public class HistoryScreen implements AppScreen {
 
     @Override
     public String navLabel() {
-        return "Event History";
+        return "History";
     }
 
     @Override
     public String title() {
-        return "System History";
+        return "History";
     }
 
     @Override
@@ -42,10 +42,7 @@ public class HistoryScreen implements AppScreen {
             ui.statCard("Total Sessions", ui.formatNumber(stats.optDouble("totalSessions", 0)), "From process runs", AppColors.GREEN),
             ui.statCard("Completed Runs", ui.formatNumber(stats.optDouble("completedRuns", 0)), stats.optString("successRate", "0%") + " success rate", AppColors.GREEN),
             ui.statCard("Total Runtime", stats.optString("totalRuntime", "0 mins"), "All recorded runs", AppColors.GREEN)
-        }, 1);
-
-        root.addView(ui.sectionTitle("Recent Activities", "View All"));
-        root.addView(ui.simpleList(eventRows(events, 4)));
+        }, 2);
 
         root.addView(ui.sectionTitle("All Events", ""));
         root.addView(ui.simpleList(eventRows(events, 30)));
@@ -53,7 +50,7 @@ public class HistoryScreen implements AppScreen {
 
     private String[][] eventRows(JSONArray events, int limit) {
         if (events == null || events.length() == 0) {
-            return new String[][]{{"--", "No history events in MySQL yet", "Waiting for system events", "Empty"}};
+            return new String[][]{{"--", "No activity recorded yet", "New activity will appear here", ""}};
         }
         int count = Math.min(events.length(), limit);
         String[][] rows = new String[count][4];

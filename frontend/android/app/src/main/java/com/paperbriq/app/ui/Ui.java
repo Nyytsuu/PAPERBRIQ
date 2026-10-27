@@ -1,9 +1,14 @@
 package com.paperbriq.app.ui;
 
 import android.app.Activity;
+import android.animation.AnimatorSet;
+import android.animation.ObjectAnimator;
+import android.animation.StateListAnimator;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -71,7 +76,8 @@ public class Ui {
         button.setTextColor(Color.WHITE);
         button.setTextSize(15);
         button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setBackground(round(AppColors.GREEN, dp(14), Color.TRANSPARENT, 0));
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x40FFFFFF),
+            round(AppColors.GREEN, dp(14), Color.TRANSPARENT, 0), null));
         return button;
     }
 
@@ -82,7 +88,8 @@ public class Ui {
         button.setTextColor(AppColors.GREEN);
         button.setTextSize(14);
         button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setBackground(round(Color.WHITE, dp(14), AppColors.GREEN, 1));
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(0x2256992F),
+            round(Color.WHITE, dp(14), AppColors.GREEN, 1), null));
         return button;
     }
 
@@ -132,6 +139,62 @@ public class Ui {
         LinearLayout card = (LinearLayout) statCard(title, value, status, accent);
         card.addView(sparkline(accent), fullWidth(dp(46), 0, dp(8), 0, 0));
         return card;
+    }
+
+    public View readingCard(String title, String value, String detail, int accent) {
+        LinearLayout card = card(20);
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+        card.addView(iconBadge(iconNameFor(title), accent, 34),
+            new LinearLayout.LayoutParams(dp(34), dp(34)));
+        card.addView(text(title, 13, AppColors.MUTED, Typeface.BOLD));
+        card.addView(text(value, 26, AppColors.INK, Typeface.BOLD));
+        if (!detail.isEmpty()) card.addView(text(detail, 12, AppColors.MUTED, Typeface.NORMAL));
+        return card;
+    }
+
+    public void interactive(View view, String description, Runnable action, int radiusDp) {
+        view.setClickable(true);
+        view.setFocusable(true);
+        view.setContentDescription(description);
+        view.setForeground(new RippleDrawable(ColorStateList.valueOf(0x2856992F), null,
+            round(Color.WHITE, dp(radiusDp), Color.TRANSPARENT, 0)));
+        StateListAnimator states = new StateListAnimator();
+        AnimatorSet pressed = new AnimatorSet();
+        pressed.playTogether(ObjectAnimator.ofFloat(view, "scaleX", 0.97f), ObjectAnimator.ofFloat(view, "scaleY", 0.97f));
+        pressed.setDuration(100);
+        AnimatorSet released = new AnimatorSet();
+        released.playTogether(ObjectAnimator.ofFloat(view, "scaleX", 1f), ObjectAnimator.ofFloat(view, "scaleY", 1f));
+        released.setDuration(160);
+        states.addState(new int[]{android.R.attr.state_pressed}, pressed);
+        states.addState(new int[]{}, released);
+        view.setStateListAnimator(states);
+        view.setOnClickListener(clicked -> action.run());
+    }
+
+    public String machineStateLabel(String state) {
+        switch (state.toLowerCase(Locale.ROOT)) {
+            case "idle": return "Waiting to start";
+            case "ready": return "Ready";
+            case "starting": return "Getting ready";
+            case "running": return "Running";
+            case "stopping": return "Stopping";
+            case "stopped": return "Stopped";
+            case "resetting": return "Preparing to restart";
+            case "fault": return "Needs attention";
+            case "complete":
+            case "completed": return "Complete";
+            default: return state;
+        }
+    }
+
+    public String equipmentLabel(String name) {
+        return name.replaceAll("(?i)\\bPaperBriq\\s+ESP32\\b", "PaperBriq")
+            .replaceAll("(?i)\\bESP32\\b", "PaperBriq")
+            .replaceAll("(?i)\\bPaperBriq(?:\\s+PaperBriq)+\\b", "PaperBriq")
+            .replaceAll("(?i)DHT22", "Temperature and humidity sensor")
+            .replaceAll("(?i)IR sensor", "Briquette sensor")
+            .replaceAll("(?i)TFT display", "Machine screen")
+            .replaceAll("(?i)float switch", "Water level sensor");
     }
 
     public View gaugeCard(String title, String value, String subtitle) {
@@ -328,6 +391,14 @@ public class Ui {
         return Math.round(value * activity.getResources().getDisplayMetrics().density);
     }
 
+    public String formatSensorValue(String name, double value, String unit) {
+        String number = formatNumber(value);
+        if ("Temperature".equalsIgnoreCase(name)) return number + "\u00b0C";
+        if ("Humidity".equalsIgnoreCase(name)) return number + "%";
+        String suffix = unit == null ? "" : unit.trim();
+        return number + (suffix.isEmpty() ? "" : " " + suffix);
+    }
+
     public String formatNumber(double value) {
         if (value == Math.rint(value)) {
             return String.format(Locale.US, "%,.0f", value);
@@ -346,6 +417,8 @@ public class Ui {
 
     public String iconNameFor(String label) {
         String value = String.valueOf(label).toLowerCase(Locale.ROOT);
+        if (value.contains("temperature")) return "temperature";
+        if (value.contains("humidity")) return "humidity";
         if (value.contains("dashboard") || value.contains("overview")) return "dashboard";
         if (value.contains("process") || value.contains("progress") || value.contains("batch") || value.contains("shred") || value.contains("pulp")) return "process";
         if (value.contains("iot") || value.contains("sensor") || value.contains("network") || value.contains("packet") || value.contains("sync") || value.contains("online")) return "iot";

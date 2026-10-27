@@ -33,6 +33,11 @@ WiFiMulti wifiMulti;
 
 #define DHTPIN 27
 #define DHTTYPE DHT22
+// The chamber sensor and app work independently of the disconnected TFT.
+// Set to 1 in secrets.h when the display is connected again.
+#ifndef PAPERBRIQ_TFT_ENABLED
+#define PAPERBRIQ_TFT_ENABLED 0
+#endif
 #define IR_PIN 25
 #define IR_DETECTED LOW
 #define FLOAT_PIN 32
@@ -66,12 +71,45 @@ float lastHumidity = 0;
 bool haveDhtReading = false;
 unsigned long lastSampleAt = 0;
 unsigned long lastPostAt = 0;
+unsigned long lastWifiAttemptAt = 0;
+bool wifiAttempted = false;
 unsigned long lastCommandPollAt = 0;
+unsigned long lastHealthProbeAt = 0;
+unsigned long healthReplyAt = 0;
+String healthProbeId;
+bool haveHealthReply = false;
+bool healthControlIo = false;
+bool healthStopClosed = false;
+bool healthEmergencyClosed = false;
+bool healthIndicatorIo = false;
+bool healthArmed = false;
+bool healthChamberSupported = false;
+bool healthDoorClosed = false;
+bool healthFanOn = false;
+bool healthUnlockOn = false;
+bool healthTestActive = false;
+const unsigned long HEALTH_PROBE_INTERVAL_MS = 7000;
+const unsigned long HEALTH_REPLY_TIMEOUT_MS = 5000;
+const unsigned long HEALTH_FRESH_MS = 20000;
 const unsigned long SAMPLE_INTERVAL_MS = 2500;
 const unsigned long POST_INTERVAL_MS = 5000;
 const unsigned long COMMAND_POLL_INTERVAL_MS = 2000;
 const unsigned long UNO_ACK_TIMEOUT_MS = 5000;
-const unsigned long EVENT_RETRY_INTERVAL_MS = 5000;
+const unsigned long EVENT_RETRY_INTERVAL_MS = 1000;
+const unsigned long DISPLAY_STATUS_BLINK_MS = 400;
+
+enum MachineDisplayState : uint8_t {
+  DISPLAY_GETTING_READY,
+  DISPLAY_STOPPED,
+  DISPLAY_READY,
+  DISPLAY_RUNNING,
+  DISPLAY_COMPLETE,
+  DISPLAY_FAULT
+};
+
+MachineDisplayState machineDisplayState = DISPLAY_GETTING_READY;
+unsigned long lastDisplayStatusBlinkAt = 0;
+bool displayStatusBlinkOn = true;
 
 String unoLine;
 String pendingCommandId;
@@ -81,6 +119,14 @@ String lastCommandId;
 String lastCommandStatus;
 String lastCommandMessage;
 String processCommandId;
+
+// One command is in flight at a time. Keep its latest acknowledgement local
+// until the UART exchange finishes; HTTPS must not interrupt receipt of the
+// final ACK. A final result supersedes the intermediate DELIVERED report.
+String ackReportId;
+String ackReportStatus;
+String ackReportMessage;
+unsigned long lastAckReportAttemptAt = 0;
 
 struct QueuedEvent {
   String eventId;
@@ -92,7 +138,7 @@ struct QueuedEvent {
   String commandId;
 };
 
-const uint8_t EVENT_QUEUE_CAPACITY = 8;
+const uint8_t EVENT_QUEUE_CAPACITY = 32;
 QueuedEvent eventQueue[EVENT_QUEUE_CAPACITY];
 uint8_t eventQueueHead = 0;
 uint8_t eventQueueCount = 0;
@@ -204,7 +250,12 @@ bool prepareTlsClient(WiFiClientSecure &client) {
   }
 
 #if PAPERBRIQ_ALLOW_INSECURE_TLS
-  Serial.println("WARNING: HTTPS certificate verification is disabled");
+  // Report the configured TLS mode once per boot, not on every API request.
+  static bool tlsWarningShown = false;
+  if (!tlsWarningShown) {
+    Serial.println("WARNING: HTTPS certificate verification is disabled");
+    tlsWarningShown = true;
+  }
   client.setInsecure();
   return true;
 #else
@@ -263,14 +314,15 @@ int httpPostJson(const String &url, const String &payload, String &response) {
 
 void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
+  const unsigned long now = millis();
+  if (wifiAttempted && now - lastWifiAttemptAt < 15000UL) return;
+  wifiAttempted = true;
+  lastWifiAttemptAt = now;
   WiFi.mode(WIFI_STA);
-  Serial.print("Connecting to a saved Wi-Fi network");
-  unsigned long started = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) {
-    wifiMulti.run();
-    delay(300);
-    Serial.print(".");
-  }
+  Serial.print("Trying a saved Wi-Fi network");
+  // One attempt per interval; keep returning to sensors and the Uno link.
+  // Scanning can still take time, but do not loop here for 15+ seconds.
+  wifiMulti.run(1000);
   Serial.println(WiFi.status() == WL_CONNECTED ? " connected" : " failed");
   if (WiFi.status() == WL_CONNECTED) {
     Serial.print("ESP32 IP: ");
@@ -280,17 +332,79 @@ void connectWifi() {
   }
 }
 
+const char *machineDisplayLabel() {
+  switch (machineDisplayState) {
+    case DISPLAY_STOPPED: return "STOPPED";
+    case DISPLAY_READY: return "READY / CHECK";
+    case DISPLAY_RUNNING: return "PROCESS RUNNING";
+    case DISPLAY_COMPLETE: return "PROCESS COMPLETE";
+    case DISPLAY_FAULT: return "FAULT / CHECK";
+    case DISPLAY_GETTING_READY:
+    default: return "GETTING READY";
+  }
+}
+
+uint16_t machineDisplayColor() {
+  switch (machineDisplayState) {
+    case DISPLAY_READY:
+    case DISPLAY_COMPLETE:
+      return PB_GREEN;
+    case DISPLAY_RUNNING:
+      return PB_CYAN;
+    case DISPLAY_STOPPED:
+    case DISPLAY_FAULT:
+      return PB_RED;
+    case DISPLAY_GETTING_READY:
+    default:
+      return PB_ORANGE;
+  }
+}
+
+bool machineDisplayShouldBlink() {
+  return machineDisplayState == DISPLAY_GETTING_READY ||
+         machineDisplayState == DISPLAY_COMPLETE ||
+         machineDisplayState == DISPLAY_FAULT;
+}
+
+void drawMachineStatusHeader() {
+  if (!PAPERBRIQ_TFT_ENABLED) return;
+  const uint16_t color = machineDisplayColor();
+  tft.fillCircle(15, 13, 6,
+                 !machineDisplayShouldBlink() || displayStatusBlinkOn
+                     ? color
+                     : PB_CARD);
+  tft.fillRect(27, 14, 108, 9, PB_CARD);
+  tft.setTextSize(1);
+  tft.setTextColor(color);
+  tft.setCursor(27, 15);
+  tft.print(machineDisplayLabel());
+}
+
+void setMachineDisplayState(MachineDisplayState nextState) {
+  machineDisplayState = nextState;
+  displayStatusBlinkOn = true;
+  lastDisplayStatusBlinkAt = millis();
+  drawMachineStatusHeader();
+}
+
+void serviceMachineDisplayStatus() {
+  if (!machineDisplayShouldBlink()) return;
+  const unsigned long now = millis();
+  if (now - lastDisplayStatusBlinkAt < DISPLAY_STATUS_BLINK_MS) return;
+  lastDisplayStatusBlinkAt = now;
+  displayStatusBlinkOn = !displayStatusBlinkOn;
+  drawMachineStatusHeader();
+}
+
 void drawStaticDashboard() {
+  if (!PAPERBRIQ_TFT_ENABLED) return;
   tft.fillScreen(PB_BG);
   tft.fillRoundRect(4, 3, 152, 21, 5, PB_CARD);
-  tft.fillCircle(15, 13, 6, PB_GREEN);
   tft.setTextSize(1);
   tft.setTextColor(PB_WHITE);
   tft.setCursor(27, 7);
   tft.print("PAPERBRIQ");
-  tft.setTextColor(PB_GREEN);
-  tft.setCursor(27, 15);
-  tft.print("LIVE MONITOR");
+  drawMachineStatusHeader();
 
   tft.fillRoundRect(4, 28, 74, 51, 5, PB_CARD);
   tft.fillRoundRect(82, 28, 74, 51, 5, PB_CARD);
@@ -310,6 +424,7 @@ void drawStaticDashboard() {
 }
 
 void drawValues(bool dhtOK, bool detected, bool waterOK) {
+  if (!PAPERBRIQ_TFT_ENABLED) return;
   tft.fillRect(24, 48, 49, 25, PB_CARD);
   tft.fillRect(106, 48, 46, 25, PB_CARD);
   tft.fillRect(10, 101, 64, 15, PB_CARD);
@@ -344,13 +459,27 @@ void postTelemetry(bool dhtOK, bool detected, bool waterOK) {
   }
 
   String payload = "{\"deviceId\":\"" + jsonEscape(DEVICE_ID) + "\",\"readings\":[";
-  payload += "{\"name\":\"Temperature\",\"value\":" + String(lastTemp, 1) + ",\"unit\":\"C\",\"status\":\"" + String(dhtOK ? "Normal" : "Warning") + "\"},";
-  payload += "{\"name\":\"Humidity\",\"value\":" + String(lastHumidity, 1) + ",\"unit\":\"%RH\",\"status\":\"" + String(dhtOK ? "Normal" : "Warning") + "\"},";
+  if (dhtOK) {
+    payload += "{\"name\":\"Temperature\",\"value\":" + String(lastTemp, 1) + ",\"unit\":\"C\",\"status\":\"Normal\"},";
+    payload += "{\"name\":\"Humidity\",\"value\":" + String(lastHumidity, 1) + ",\"unit\":\"%RH\",\"status\":\"Normal\"},";
+  }
   payload += "{\"name\":\"IR Sensor\",\"value\":" + String(detected ? 1 : 0) + ",\"unit\":\"digital\",\"status\":\"Normal\"},";
   payload += "{\"name\":\"Rainwater Level\",\"value\":" + String(waterOK ? 100 : 0) + ",\"unit\":\"%\",\"status\":\"" + String(waterOK ? "Normal" : "Warning") + "\"}";
   payload += "],\"hardware\":{";
   payload += "\"dht22\":\"" + String(dhtOK ? "Online" : "Attention") + "\",";
-  payload += "\"irSensor\":\"Online\",\"tftDisplay\":\"Online\",\"floatSwitch\":\"Online\"}}";
+  payload += "\"irSensor\":\"Manual check\",\"tftDisplay\":\"" + String(PAPERBRIQ_TFT_ENABLED ? "Manual check" : "Disabled") + "\",\"floatSwitch\":\"Manual check\"},";
+  const bool linkFresh = haveHealthReply && millis() - healthReplyAt < HEALTH_FRESH_MS;
+  payload += "\"checks\":{\"version\":" + String(healthChamberSupported ? 2 : 1) + ",\"unoLink\":" + String(linkFresh ? "true" : "false");
+  payload += ",\"controlIo\":" + String(linkFresh && healthControlIo ? "true" : "false");
+  payload += ",\"stopClosed\":" + String(linkFresh && healthStopClosed ? "true" : "false");
+  payload += ",\"emergencyClosed\":" + String(linkFresh && healthEmergencyClosed ? "true" : "false");
+  payload += ",\"indicatorIo\":" + String(linkFresh && healthIndicatorIo ? "true" : "false");
+  payload += ",\"armed\":" + String(linkFresh && healthArmed ? "true" : "false");
+  payload += ",\"doorClosed\":" + String(linkFresh && healthDoorClosed ? "true" : "false");
+  payload += ",\"fanOn\":" + String(linkFresh && healthFanOn ? "true" : "false");
+  payload += ",\"unlockOn\":" + String(linkFresh && healthUnlockOn ? "true" : "false");
+  payload += ",\"testActive\":" + String(linkFresh && healthTestActive ? "true" : "false");
+  payload += ",\"dht\":" + String(dhtOK ? "true" : "false") + "}}";
 
   String response;
   const int code = httpPostJson(base + "/api/iot/readings", payload, response);
@@ -418,6 +547,9 @@ void serviceEventQueue() {
 
 bool postCommandAck(const String &id, const String &status,
                     const String &message) {
+  Serial.print("Command result: "); Serial.print(status);
+  Serial.print(" | "); Serial.print(message);
+  Serial.print(" | id="); Serial.println(id);
   if (WiFi.status() != WL_CONNECTED || !isSafeCommandId(id)) return false;
   const String base = apiBaseUrl();
   if (base.length() == 0) return false;
@@ -427,11 +559,22 @@ bool postCommandAck(const String &id, const String &status,
   String response;
   const int code = httpPostJson(base + "/api/device/commands/" + id + "/ack",
                                 payload, response);
-  Serial.print("Command ACK ");
-  Serial.print(status);
-  Serial.print(": ");
+  Serial.print("ACK report HTTP: ");
   Serial.println(code);
   return code >= 200 && code < 300;
+}
+
+void serviceAckReport() {
+  if (pendingCommandId.length() > 0 || ackReportId.length() == 0 ||
+      WiFi.status() != WL_CONNECTED ||
+      millis() - lastAckReportAttemptAt < 1000UL) return;
+  lastAckReportAttemptAt = millis();
+  // The cached final result is also retried if the backend returns the same
+  // command again. Do not block all later commands on a rejected HTTP report.
+  postCommandAck(ackReportId, ackReportStatus, ackReportMessage);
+  ackReportId = "";
+  ackReportStatus = "";
+  ackReportMessage = "";
 }
 
 void cacheFinalCommand(const String &id, const String &status,
@@ -444,7 +587,7 @@ void cacheFinalCommand(const String &id, const String &status,
 void dispatchCommand(const String &id, String action) {
   action.toLowerCase();
   if (!isSafeCommandId(id) ||
-      (action != "start" && action != "stop" && action != "reset")) {
+      (action != "start" && action != "stop" && action != "reset" && action != "self_test")) {
     postCommandAck(id, "failed", "unsupported command");
     cacheFinalCommand(id, "failed", "unsupported command");
     enqueueDeviceEvent("command_rejected", "warning", "controller", "stopped",
@@ -455,7 +598,12 @@ void dispatchCommand(const String &id, String action) {
   pendingCommandId = id;
   pendingCommandAction = action;
   pendingCommandSentAt = millis();
-  if (action == "start") processCommandId = id;
+  if (action == "start" || action == "self_test") processCommandId = id;
+  if (action == "start" || action == "reset") {
+    setMachineDisplayState(DISPLAY_GETTING_READY);
+  } else if (action == "stop") {
+    setMachineDisplayState(DISPLAY_STOPPED);
+  }
   String protocolAction = action;
   protocolAction.toUpperCase();
   unoLink.print("CMD|");
@@ -463,11 +611,13 @@ void dispatchCommand(const String &id, String action) {
   unoLink.print('|');
   unoLink.println(protocolAction);
   Serial.print("Sent command to Uno: ");
-  Serial.println(protocolAction);
+  Serial.print(protocolAction);
+  Serial.print(" | id="); Serial.println(id);
 }
 
 void pollNextCommand() {
-  if (pendingCommandId.length() > 0 || WiFi.status() != WL_CONNECTED) return;
+  if (pendingCommandId.length() > 0 || ackReportId.length() > 0 ||
+      WiFi.status() != WL_CONNECTED) return;
   const String base = apiBaseUrl();
   if (base.length() == 0) return;
   String response;
@@ -500,10 +650,15 @@ void pollNextCommand() {
 
 void finishPendingCommand(const String &status, String message) {
   message.replace('_', ' ');
-  postCommandAck(pendingCommandId, status, message);
+  Serial.print("Command status: "); Serial.print(status);
+  Serial.print(" | "); Serial.println(message);
+  ackReportId = pendingCommandId;
+  ackReportStatus = status;
+  ackReportMessage = message;
   if (status == "completed" || status == "failed") {
+    if (status == "failed") setMachineDisplayState(DISPLAY_FAULT);
     cacheFinalCommand(pendingCommandId, status, message);
-    if (status == "failed" && pendingCommandAction == "start" &&
+    if (status == "failed" && (pendingCommandAction == "start" || pendingCommandAction == "self_test") &&
         processCommandId == pendingCommandId) {
       processCommandId = "";
     }
@@ -522,7 +677,7 @@ void handleUnoAck(const String &line) {
   String status = line.substring(second + 1, third);
   String message = line.substring(third + 1);
   status.toLowerCase();
-  if (id != pendingCommandId) {
+  if (pendingCommandId.length() == 0 || id != pendingCommandId) {
     Serial.println("Ignoring ACK for a non-pending command");
     return;
   }
@@ -545,6 +700,26 @@ void handleUnoEvent(const String &line) {
   String commandId;
   String eventType = fields[0];
   eventType.toUpperCase();
+  String severity = fields[1];
+  severity.toLowerCase();
+  String processState = fields[3];
+  processState.toLowerCase();
+
+  if (eventType == "FAULT" || severity == "error" ||
+      severity == "critical") {
+    setMachineDisplayState(DISPLAY_FAULT);
+  } else if (eventType == "STOPPED" || eventType == "CONTROLLER_READY") {
+    setMachineDisplayState(DISPLAY_STOPPED);
+  } else if (eventType == "ARMED") {
+    setMachineDisplayState(DISPLAY_READY);
+  } else if (eventType == "PROCESS_STARTED") {
+    setMachineDisplayState(DISPLAY_GETTING_READY);
+  } else if (eventType == "PROCESS_COMPLETED" || eventType == "TEST_COMPLETED") {
+    setMachineDisplayState(DISPLAY_COMPLETE);
+  } else if (processState == "running") {
+    setMachineDisplayState(DISPLAY_RUNNING);
+  }
+
   if ((eventType == "STOPPED" || eventType == "ARMED") &&
       pendingCommandId.length() > 0) {
     commandId = pendingCommandId;
@@ -553,10 +728,90 @@ void handleUnoEvent(const String &line) {
   }
   enqueueDeviceEvent(fields[0], fields[1], fields[2], fields[3], fields[4],
                      commandId);
-  if (eventType == "PROCESS_COMPLETED" || eventType == "STOPPED" ||
+  if (eventType == "PROCESS_COMPLETED" || eventType == "TEST_COMPLETED" || eventType == "TEST_ABORTED" || eventType == "STOPPED" ||
       eventType == "FAULT") {
     processCommandId = "";
   }
+}
+
+void handleUnoHealth(const String &line) {
+  const int separator = line.indexOf('|', 7);
+  if (separator < 0 || healthProbeId.length() == 0 ||
+      line.substring(7, separator) != healthProbeId ||
+      millis() - lastHealthProbeAt > HEALTH_REPLY_TIMEOUT_MS) return;
+  const String flags = line.substring(separator + 1);
+  if (flags.length() != 9 && flags.length() != 17) return;
+  for (uint8_t i = 0; i < flags.length(); ++i) {
+    if (i % 2 == 1 ? flags[i] != '|' : (flags[i] != '0' && flags[i] != '1')) return;
+  }
+  healthControlIo = flags[0] == '1';
+  healthStopClosed = flags[2] == '1';
+  healthEmergencyClosed = flags[4] == '1';
+  healthIndicatorIo = flags[6] == '1';
+  healthArmed = flags[8] == '1';
+  healthChamberSupported = flags.length() == 17;
+  healthDoorClosed = healthChamberSupported && flags[10] == '1';
+  healthFanOn = healthChamberSupported && flags[12] == '1';
+  healthUnlockOn = healthChamberSupported && flags[14] == '1';
+  healthTestActive = healthChamberSupported && flags[16] == '1';
+  healthReplyAt = millis();
+  haveHealthReply = true;
+  healthProbeId = "";
+}
+
+void serviceHealthProbe() {
+  const unsigned long now = millis();
+  if (pendingCommandId.length() > 0 || now - lastHealthProbeAt < HEALTH_PROBE_INTERVAL_MS) return;
+  lastHealthProbeAt = now;
+  healthProbeId = "health-" + String(now, HEX);
+  unoLink.println("CMD|" + healthProbeId + "|CHECK");
+}
+
+void sampleChamberSensor() {
+  const unsigned long now = millis();
+  if (now - lastSampleAt < SAMPLE_INTERVAL_MS) return;
+  lastSampleAt = now;
+  const float temperature = dht.readTemperature();
+  const float humidity = dht.readHumidity();
+  haveDhtReading = isfinite(temperature) && isfinite(humidity) &&
+      temperature >= -40 && temperature <= 80 && humidity >= 0 && humidity <= 100;
+  if (haveDhtReading) { lastTemp = temperature; lastHumidity = humidity; }
+  printChamberSensor();
+}
+
+void printChamberSensor() {
+  Serial.print("Chamber DHT22 GPIO27: ");
+  if (!haveDhtReading || millis() - lastSampleAt >= 10000UL) {
+    Serial.println("no fresh valid reading; check sensor connection");
+    return;
+  }
+  Serial.print(lastTemp, 1); Serial.print(" C, ");
+  Serial.print(lastHumidity, 1); Serial.println(" %RH");
+}
+
+void serviceSensorSerial() {
+  while (Serial.available() > 0) {
+    const char c = Serial.read();
+    if (c == 's' || c == 'S') {
+      sampleChamberSensor();
+      printChamberSensor();
+    }
+  }
+}
+
+void replyDhtCheck(const String &request) {
+  const String id = request.substring(10); // DHT_CHECK|<request number>
+  if (id.length() == 0 || id.length() > 10) return;
+  for (size_t i = 0; i < id.length(); i++) if (!isDigit(id[i])) return;
+  sampleChamberSensor();
+  const bool fresh = haveDhtReading && millis() - lastSampleAt < 10000UL;
+  unoLink.print("DHT|"); unoLink.print(id);
+  if (!fresh) {
+    unoLink.println("|ERROR");
+    return;
+  }
+  unoLink.print("|OK|"); unoLink.print(lastTemp, 1);
+  unoLink.print('|'); unoLink.println(lastHumidity, 1);
 }
 
 void serviceUnoLink() {
@@ -573,12 +828,15 @@ void serviceUnoLink() {
 
         if (unoLine.startsWith("ACK|")) handleUnoAck(unoLine);
         else if (unoLine.startsWith("EVENT|")) handleUnoEvent(unoLine);
+        else if (unoLine.startsWith("HEALTH|")) handleUnoHealth(unoLine);
+        else if (unoLine.startsWith("DHT_CHECK|")) replyDhtCheck(unoLine);
       }
       unoLine = "";
     } else if (c != '\r') {
       if (unoLine.length() < 159) unoLine += c;
       else {
         unoLine = "";
+        setMachineDisplayState(DISPLAY_FAULT);
         enqueueDeviceEvent("uart_frame_overflow", "error", "controller", "fault",
                            "Uno link frame overflow");
       }
@@ -589,12 +847,13 @@ void serviceUnoLink() {
       millis() - pendingCommandSentAt >= UNO_ACK_TIMEOUT_MS) {
     const String failedId = pendingCommandId;
     const String failedAction = pendingCommandAction;
-    postCommandAck(failedId, "failed", "Arduino Uno acknowledgement timeout");
-    cacheFinalCommand(failedId, "failed", "Arduino Uno acknowledgement timeout");
-    pendingCommandId = "";
-    pendingCommandAction = "";
-    pendingCommandSentAt = 0;
-    if (failedAction == "start") processCommandId = "";
+    const bool delivered = ackReportId == failedId && ackReportStatus == "delivered";
+    const String reason = delivered ? "Uno received command but final acknowledgement timed out" :
+                                      "No matching Uno acknowledgement within 5 seconds";
+    Serial.print("UART ACK TIMEOUT: "); Serial.println(reason);
+    finishPendingCommand("failed", reason);
+    if (failedAction == "start" || failedAction == "self_test") processCommandId = "";
+    setMachineDisplayState(DISPLAY_FAULT);
     enqueueDeviceEvent("controller_link_timeout", "critical", "controller", "fault",
                        "Arduino Uno did not acknowledge command", failedId);
 
@@ -605,27 +864,63 @@ void serviceUnoLink() {
 
 void setup() {
   Serial.begin(115200);
+  delay(300);
+  Serial.println();
+  Serial.println("PaperBriq monitor starting - automatic Wi-Fi and app connection");
+  Serial.println("Firmware: ack-diagnostics-v4 | DHT22 GPIO27 | USB S and Uno S supported");
+
+  if (PAPERBRIQ_TFT_ENABLED) {
+  // Match the working TFT-only test before initializing other peripherals.
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
+  Serial.println("Initializing TFT");
+  tft.initR(INITR_BLACKTAB);
+  // Keep the conservative drawing speed used during TFT troubleshooting.
+  tft.setSPISpeed(1000000);
+  // Flip the previous landscape rotation (1) by 180 degrees.
+  tft.setRotation(3);
+  Serial.print("TFT drawing SPI: 1 MHz; rotation: ");
+  Serial.println(tft.getRotation());
+  tft.setTextWrap(false);
+  drawStaticDashboard();
+  Serial.println("TFT dashboard draw complete");
+  } else {
+    Serial.println("TFT disabled; chamber DHT22 and app telemetry remain active");
+  }
+
+  // Preserve bursts of ACK/EVENT frames during unavoidable network requests.
+  unoLink.setRxBufferSize(2048);
   unoLink.begin(UNO_LINK_BAUD, SERIAL_8N1, UNO_LINK_RX, UNO_LINK_TX);
   bootToken = String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX) + "-" +
               String(millis(), HEX);
   dht.begin();
   pinMode(IR_PIN, INPUT);
   pinMode(FLOAT_PIN, INPUT_PULLUP);
-  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
-  tft.initR(INITR_BLACKTAB);
-  tft.setRotation(1);
-  drawStaticDashboard();
+  Serial.println("Sensors and Uno link initialized");
   wifiMulti.addAP(HOME_WIFI_SSID, HOME_WIFI_PASSWORD);
   wifiMulti.addAP(HOTSPOT_ONE_SSID, HOTSPOT_ONE_PASSWORD);
   wifiMulti.addAP(HOTSPOT_TWO_SSID, HOTSPOT_TWO_PASSWORD);
-  connectWifi();
   Serial.println("ESP32/Uno command bridge ready; Uno remains stopped until RESET");
 }
 
 void loop() {
+  // Sample and service local diagnostics before potentially slow networking.
+  sampleChamberSensor();
+  serviceSensorSerial();
   serviceUnoLink();
+  serviceMachineDisplayStatus();
+  // Keep reading UART until the final ACK or the existing 5-second deadline.
+  // No Wi-Fi reconnect, telemetry, or event upload may consume that window.
+  if (pendingCommandId.length() > 0) { delay(1); return; }
   const unsigned long now = millis();
   if (WiFi.status() != WL_CONNECTED) connectWifi();
+  sampleChamberSensor();
+  serviceSensorSerial();
+  serviceUnoLink();
+
+  serviceAckReport();
+  serviceUnoLink();
 
   if (now - lastCommandPollAt >= COMMAND_POLL_INTERVAL_MS) {
     lastCommandPollAt = now;
@@ -633,27 +928,21 @@ void loop() {
   }
 
   serviceUnoLink();
+  if (pendingCommandId.length() > 0) { delay(1); return; }
   serviceEventQueue();
   serviceUnoLink();
 
-  if (now - lastSampleAt >= SAMPLE_INTERVAL_MS) {
-    lastSampleAt = now;
-    const float temperature = dht.readTemperature();
-    const float humidity = dht.readHumidity();
-    const bool dhtOK = !isnan(temperature) && !isnan(humidity);
-    if (dhtOK) {
-      lastTemp = temperature;
-      lastHumidity = humidity;
-      haveDhtReading = true;
-    }
-
+  sampleChamberSensor();
+  const unsigned long telemetryNow = millis();
+  if (telemetryNow - lastPostAt >= POST_INTERVAL_MS) {
+    lastPostAt = telemetryNow;
+    const bool dhtOK = haveDhtReading && telemetryNow - lastSampleAt < 10000UL;
     const bool detected = digitalRead(IR_PIN) == IR_DETECTED;
     const bool waterOK = digitalRead(FLOAT_PIN) == LOW;
     drawValues(dhtOK, detected, waterOK);
-    if (now - lastPostAt >= POST_INTERVAL_MS && haveDhtReading) {
-      lastPostAt = now;
-      postTelemetry(dhtOK, detected, waterOK);
-    }
+    postTelemetry(dhtOK, detected, waterOK);
   }
   serviceUnoLink();
+  serviceMachineDisplayStatus();
+  serviceHealthProbe();
 }
