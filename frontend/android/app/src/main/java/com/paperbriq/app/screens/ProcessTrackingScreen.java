@@ -5,8 +5,10 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -50,6 +52,7 @@ public class ProcessTrackingScreen implements AppScreen {
 
         if (controller.canControlMachine()) {
             addMachineControls(root, controller, ui);
+            addProductionSettings(root, controller, ui);
         }
 
         root.addView(ui.sectionTitle("Forming steps", ""));
@@ -73,7 +76,7 @@ public class ProcessTrackingScreen implements AppScreen {
         JSONObject checks = controller.session().pagePayload("deviceControl").optJSONObject("machineChecks");
         JSONObject chamber = checks == null ? null : checks.optJSONObject("chamber");
         root.addView(ui.infoListCard("Drying chamber", new String[][]{
-            {"Drying", "Not enabled"},
+            {"Automatic drying", "Not enabled"},
             {"Fan", reportedBoolean(chamber, "fanOn", "On command", "Off command")},
             {"Unlock power", reportedBoolean(chamber, "unlockOn", "On", "Off")},
             {"Door contact", reportedBoolean(chamber, "doorClosed", "Closed", "Open")}
@@ -96,6 +99,110 @@ public class ProcessTrackingScreen implements AppScreen {
     private String reportedBoolean(JSONObject report, String key, String yes, String no) {
         return report == null || !report.has(key) || report.isNull(key)
             ? "Not reported" : report.optBoolean(key) ? yes : no;
+    }
+
+    private void addProductionSettings(LinearLayout root, AppController controller, Ui ui) {
+        JSONObject status = controller.session().pagePayload("deviceControl");
+        JSONObject controls = status.optJSONObject("productionControls");
+        JSONObject run = controls == null ? null : controls.optJSONObject("run");
+        LinearLayout card = ui.card(18);
+        card.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
+        card.addView(ui.text("Pump & drying", 19, AppColors.INK, Typeface.BOLD));
+        card.addView(ui.text("Set the total time, then apply it to the machine", 12, AppColors.MUTED, Typeface.NORMAL));
+        for (String action : new String[]{"pump", "drying"}) {
+            String label = "pump".equals(action) ? "Pump time" : "Drying time";
+            LinearLayout row = ui.row();
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout description = ui.column();
+            description.addView(ui.text(label, 15, AppColors.INK, Typeface.BOLD));
+            TextView duration = ui.text(durationLabel(controller.productionSeconds(action)), 18, AppColors.GREEN_DARK, Typeface.BOLD);
+            description.addView(duration);
+            row.addView(description, new LinearLayout.LayoutParams(0, -2, 1));
+            Button edit = ui.outlineButton("Set time");
+            edit.setContentDescription("Set " + label.toLowerCase());
+            edit.setOnClickListener(v -> editProductionDuration(controller, ui, action, label));
+            row.addView(edit, new LinearLayout.LayoutParams(ui.dp(108), ui.dp(48)));
+            card.addView(row, ui.fullWidth(-2, 0, ui.dp(16), 0, 0));
+            JSONObject output = controls == null ? null : controls.optJSONObject(action);
+            boolean ownRun = controls != null && controls.optBoolean("active") && run != null && action.equals(run.optString("output"));
+            int maximum = output == null ? 0 : output.optInt("maxSeconds");
+            card.addView(ui.text(maximum > 0 ? "Maximum: " + durationLabel(maximum) : "Maximum time awaiting commissioning", 12, AppColors.MUTED, Typeface.NORMAL));
+            if (run != null && action.equals(run.optString("output"))) {
+                String state = run.optString("state", "unknown").replace('_', ' ');
+                int remaining = run.optInt("remainingSeconds");
+                card.addView(ui.text("Controller: " + state + " • remaining " + (remaining == 0 ? "0 sec" : durationLabel(remaining)), 13, AppColors.INK, Typeface.BOLD));
+                card.addView(ui.text("Applied total: " + durationLabel(run.optInt("totalSeconds")) + " • last machine report", 12, AppColors.MUTED, Typeface.NORMAL));
+            }
+            String command = ownRun ? action + "_time" : "pump".equals(action) ? "pump_arm" : "drying_start";
+            Button apply = ui.greenButton(ownRun ? "Apply total time" : "pump".equals(action) ? "Enable pump for next batch" : "Start drying");
+            boolean available = status.optBoolean("enabled") && output != null && output.optBoolean(ownRun ? "canAdjust" : "canStart")
+                && controller.productionSeconds(action) > 0 && controller.productionSeconds(action) <= maximum;
+            apply.setEnabled(available); apply.setAlpha(available ? 1f : 0.45f);
+            apply.setOnClickListener(v -> controller.confirmAction(ownRun ? "Change this run's total time?" : "pump".equals(action) ? "Enable the pump for the next batch?" : "Start drying?",
+                ownRun ? "Elapsed time is kept. A total shorter than elapsed time stops the output. Wait for the controller to confirm the change."
+                : "pump".equals(action) ? "After enabling, use Reset and Start forming. Paper detection during mixing starts one timed water run."
+                : "Load the drying chamber, close the door and keep the heater fan and thermostat operating.",
+                () -> controller.sendProductionCommand(command, controller.productionSeconds(action), ownRun ? run.optString("id") : "")));
+            card.addView(apply, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+            if (!available) card.addView(ui.text(output == null ? "Update and reconnect the machine boards and server."
+                : !output.optString("reason").isEmpty() ? output.optString("reason")
+                : controller.productionSeconds(action) <= 0 ? "Set a duration first." : controller.productionSeconds(action) > maximum ? "Choose a time within the operating limit." : "Waiting for machine controls.",
+                12, AppColors.MUTED, Typeface.NORMAL));
+        }
+        card.addView(ui.text("Pump trigger: paper entering the mixer", 13, AppColors.INK, Typeface.BOLD),
+            ui.fullWidth(-2, 0, ui.dp(16), 0, ui.dp(6)));
+        card.addView(ui.text("Drying needs a separate start after loading the chamber. The paper sensor does not start the heater.", 12, AppColors.MUTED, Typeface.NORMAL),
+            ui.fullWidth(-2, 0, 0, 0, ui.dp(6)));
+        card.addView(ui.text("Temperature is set on the digital thermostat.", 12, AppColors.MUTED, Typeface.NORMAL));
+        Button stop = ui.outlineButton("Stop"); stop.setTextColor(AppColors.RED);
+        JSONObject device = status.optJSONObject("device");
+        stop.setEnabled(status.optBoolean("enabled") && device != null && device.optBoolean("connected"));
+        stop.setOnClickListener(v -> controller.sendDeviceCommand("stop"));
+        card.addView(stop, ui.fullWidth(ui.dp(48), 0, ui.dp(12), 0, 0));
+        root.addView(card, ui.fullWidth(-2, 0, ui.dp(12), 0, ui.dp(12)));
+    }
+
+    private String durationLabel(int seconds) {
+        if (seconds <= 0) return "Not set";
+        int minutes = seconds / 60, remainder = seconds % 60;
+        return minutes == 0 ? remainder + " sec" : minutes + " min" + (remainder == 0 ? "" : " " + remainder + " sec");
+    }
+
+    private void editProductionDuration(AppController controller, Ui ui, String action, String label) {
+        LinearLayout content = ui.column();
+        content.setPadding(ui.dp(20), ui.dp(12), ui.dp(20), ui.dp(8));
+        content.addView(ui.text("Save the total duration. Use Apply total time to change an active run; elapsed time will be kept.", 13, AppColors.MUTED, Typeface.NORMAL));
+        EditText minutes = ui.editText("Minutes", false);
+        EditText seconds = ui.editText("Seconds (0–59)", false);
+        minutes.setInputType(InputType.TYPE_CLASS_NUMBER);
+        seconds.setInputType(InputType.TYPE_CLASS_NUMBER);
+        minutes.setContentDescription("Minutes"); seconds.setContentDescription("Seconds");
+        int saved = controller.productionSeconds(action);
+        if (saved > 0) { minutes.setText(String.valueOf(saved / 60)); seconds.setText(String.valueOf(saved % 60)); }
+        content.addView(minutes, ui.fullWidth(ui.dp(52), 0, ui.dp(12), 0, 0));
+        content.addView(seconds, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+        AlertDialog dialog = new AlertDialog.Builder(controller.activity()).setTitle(label).setView(content)
+            .setNegativeButton("Cancel", null).setNeutralButton("Clear", (d, which) -> {
+                controller.saveProductionSeconds(action, 0);
+            }).setPositiveButton("Save time", null).create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            try {
+                String m = minutes.getText().toString().trim(), s = seconds.getText().toString().trim();
+                if ((!m.isEmpty() && !m.matches("[0-9]+")) || (!s.isEmpty() && !s.matches("[0-9]+"))) throw new NumberFormatException();
+                long mins = m.isEmpty() ? 0 : Long.parseLong(m), secs = s.isEmpty() ? 0 : Long.parseLong(s);
+                if (secs > 59) { seconds.setError("Use 0–59 seconds"); return; }
+                // Storage arithmetic bound only; not a commissioned operating limit.
+                if (mins > Integer.MAX_VALUE / 60000L) { minutes.setError("Duration is too large"); return; }
+                long total = mins * 60 + secs;
+                if (total < 1 || total > Integer.MAX_VALUE / 1000) { seconds.setError("Enter a valid duration above zero"); return; }
+                JSONObject controls = controller.session().pagePayload("deviceControl").optJSONObject("productionControls");
+                JSONObject output = controls == null ? null : controls.optJSONObject(action);
+                int max = output == null ? 0 : output.optInt("maxSeconds");
+                if (max > 0 && total > max) { seconds.setError("Maximum " + durationLabel(max)); return; }
+                controller.saveProductionSeconds(action, (int) total); dialog.dismiss();
+            } catch (NumberFormatException error) { seconds.setError("Enter whole minutes and seconds"); }
+        }));
+        dialog.show();
     }
 
     private void addMachineControls(LinearLayout root, AppController controller, Ui ui) {

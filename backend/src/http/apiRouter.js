@@ -4,10 +4,31 @@ const { dataStore } = require("../db");
 const { normalizeMachineHealth, buildMachineChecks } = require("../db/machineChecks");
 const { buildMachineProcess } = require("../db/machineProcess");
 const { buildComponentTests } = require("../db/componentTests");
+const { encodeTimedCommand, buildTimedControls } = require("../db/timedControls");
+const { validateSettings, buildProductionControls, encodeProductionCommand } = require('../db/productionControls');
 const { readJson, sendJson } = require("./json");
 const { streamLive } = require("./liveStream");
 
 async function routeApi(req, res, requestUrl) {
+  if (req.method === 'POST' && requestUrl.pathname === '/api/device/production-settings') {
+    const denied = requireControlAccess(req);
+    if (denied) { sendJson(res, denied.status, {error:denied.message}); return; }
+    const body = await readJson(req), deviceId = normalizeDeviceId(body.deviceId);
+    if (!deviceId) { sendJson(res,400,{error:'A valid deviceId is required.'}); return; }
+    try {
+      const settings = validateSettings(body);
+      const latest = await dataStore.getMachineHealth(deviceId);
+      for (const key of ['pump','drying']) {
+        const maximum = latest?.health?.production?.[key+'MaxSeconds'];
+        if (Number.isInteger(maximum) && maximum > 0 && settings[key+'Seconds'] > maximum) {
+          sendJson(res,400,{error:`Maximum ${key} duration is ${maximum} seconds.`}); return;
+        }
+      }
+      sendJson(res,200,{ settings:await dataStore.saveProductionSettings(deviceId,settings) });
+    }
+    catch(error) { sendStoreError(res,error,'Unable to save production settings.'); }
+    return;
+  }
   if (req.method === "GET" && requestUrl.pathname === "/api/live") {
     await streamLive(req, res, requestUrl);
     return;
@@ -32,15 +53,21 @@ async function routeApi(req, res, requestUrl) {
 
     const body = await readJson(req);
     const deviceId = normalizeDeviceId(body.deviceId);
-    const command = String(body.command || "").trim().toLowerCase();
+    let command = String(body.command || "").trim().toLowerCase();
+    const timed = command === "heater" || command === "pump";
+    const productionCommand = ['pump_arm','drying_start','pump_time','drying_time'].includes(command);
     const idempotencyKey = normalizeOptionalToken(req.headers["idempotency-key"], 120);
     if (!deviceId) {
       sendJson(res, 400, { error: "A valid deviceId is required." });
       return;
     }
-    if (!new Set(["start", "stop", "reset", "self_test"]).has(command)) {
-      sendJson(res, 400, { error: "command must be start, stop, reset, or self_test." });
+    if (!new Set(["start", "stop", "reset", "self_test", "heater", "pump"]).has(command) && !productionCommand) {
+      sendJson(res, 400, { error: "Unsupported machine command." });
       return;
+    }
+    if (timed) {
+      try { encodeTimedCommand(command, body.durationSeconds); }
+      catch (error) { sendJson(res, 400, { error: error.message }); return; }
     }
     if (req.headers["idempotency-key"] && !idempotencyKey) {
       sendJson(res, 400, { error: "Idempotency-Key contains unsupported characters or is too long." });
@@ -48,6 +75,19 @@ async function routeApi(req, res, requestUrl) {
     }
 
     try {
+      if (productionCommand) {
+        const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
+        const controls = buildProductionControls(await dataStore.getMachineHealth(deviceId), status, await dataStore.getProductionSettings(deviceId));
+        command = encodeProductionCommand(command, body, controls);
+      }
+      if (timed) {
+        const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
+        const controls = buildTimedControls(await dataStore.getMachineHealth(deviceId), status);
+        if (body.supervised !== true || !controls[command].available) {
+          sendJson(res, 409, { error: controls[command].reason || 'Remain beside the machine during this short run.' }); return;
+        }
+        command = encodeTimedCommand(command, body.durationSeconds);
+      }
       if (command === "self_test") {
         const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
         const checks = buildMachineChecks(await dataStore.getMachineHealth(deviceId), status);
@@ -60,7 +100,7 @@ async function routeApi(req, res, requestUrl) {
         deviceId,
         command,
         idempotencyKey,
-        ttlSeconds: command === "self_test" ? 15 : deviceCommandTtlSeconds()
+        ttlSeconds: timed || productionCommand ? 5 : command === "self_test" ? 15 : deviceCommandTtlSeconds()
       });
       sendJson(res, 201, { command: commandRecord });
     } catch (error) {
@@ -153,13 +193,16 @@ async function routeApi(req, res, requestUrl) {
     const onlineAfter = new Date(Date.now() - deviceOnlineSeconds() * 1000);
     try {
       const status = await dataStore.getDeviceControlStatus(deviceId, onlineAfter);
+      const healthReport = await dataStore.getMachineHealth(deviceId);
       sendJson(res, 200, {
         enabled,
         configured,
         ...status,
         processRun: buildMachineProcess(status),
         componentTests: buildComponentTests(status),
-        machineChecks: buildMachineChecks(await dataStore.getMachineHealth(deviceId), status),
+        machineChecks: buildMachineChecks(healthReport, status),
+        timedControls: buildTimedControls(healthReport, status),
+        productionControls: buildProductionControls(healthReport, status, await dataStore.getProductionSettings(deviceId)),
         generatedAt: new Date().toISOString()
       });
     } catch (error) {

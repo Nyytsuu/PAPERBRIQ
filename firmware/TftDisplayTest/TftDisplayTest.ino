@@ -28,7 +28,6 @@ void setup() {
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
-
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(3);
 

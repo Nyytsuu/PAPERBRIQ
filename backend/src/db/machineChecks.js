@@ -1,12 +1,17 @@
 const MAX_REPORT_AGE_MS = 30000;
+const { normalizeProduction } = require('./productionControls');
 const HEALTH_FIELDS = ["unoLink", "controlIo", "stopClosed", "emergencyClosed", "indicatorIo", "armed", "dht"];
 
 function normalizeMachineHealth(value) {
-  if (!value || ![1, 2].includes(value.version)) return null;
+  if (!value || ![1, 2, 3].includes(value.version)) return null;
   const health = { version: value.version };
+  health.production = normalizeProduction(value.production);
   for (const key of HEALTH_FIELDS) health[key] = typeof value[key] === "boolean" ? value[key] : null;
-  if (value.version === 2) {
+  if (value.version >= 2) {
     for (const key of ["doorClosed", "fanOn", "unlockOn", "testActive"]) health[key] = typeof value[key] === "boolean" ? value[key] : null;
+  }
+  if (value.version === 3) {
+    for (const key of ["timedSupported", "heaterOn", "pumpOn", "heaterReady", "pumpReady"]) health[key] = typeof value[key] === "boolean" ? value[key] : null;
   }
   return health;
 }
@@ -39,7 +44,7 @@ function buildMachineChecks(report, control, now = Date.now()) {
   }
   controllerCheck("indicatorIo", "Indicator connections", "The indicator board responded. Check the actual lights and buzzer yourself.", "The indicator board is not responding.");
   controllerCheck("armed", "Ready to start", "The software stop has been reset.", "Inspect the machine, then use Reset and check again.");
-  if (health?.version === 2) {
+  if (health?.version >= 2) {
     add("doorClosed", "Door contact", linked && health.indicatorIo === true ? health.doorClosed : null,
       "Door contact is closed; this does not prove lock engagement.", "Close the door and check its interlock.", "Door input unavailable.");
     add("testIdle", "Component tests idle", linked && health.testActive !== null ? !health.testActive : null,
@@ -55,8 +60,8 @@ function buildMachineChecks(report, control, now = Date.now()) {
     checkedAt: new Date(now).toISOString(),
     reportAt: report?.recordedAt || null,
     validForMs: fresh ? Math.max(0, MAX_REPORT_AGE_MS - age) : 0,
-    componentTestsSupported: linked && health?.version === 2,
-    chamber: linked && health?.version === 2 && health.indicatorIo === true ? {
+    componentTestsSupported: linked && health?.version >= 2,
+    chamber: linked && health?.version >= 2 && health.indicatorIo === true ? {
       doorClosed: health.doorClosed, fanOn: health.fanOn, unlockOn: health.unlockOn, testActive: health.testActive
     } : null,
     items

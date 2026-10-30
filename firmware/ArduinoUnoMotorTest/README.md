@@ -2,11 +2,118 @@
 
 This bench test uses the ESP32 for sensors, TFT, Wi-Fi, and monitoring and the Uno for motor, gate, button, indicator, door-interlock, fan and lock controls. The active sketch includes `ChamberControl.h`. See [chamber setup](../CHAMBER_SETUP.md) and [Check machine](../MACHINE_CHECK.md) for wiring, commands and the supervised component-test sequence.
 
-Send **S** in Uno Serial Monitor (9600 baud) to request the drying-chamber DHT22
+The app now supports production timer commands, server-saved settings and active
+run adjustments. See [production timers](../TIMED_CONTROLS.md). Outputs remain
+disabled until hardware verification and operating maxima are commissioned.
+Verbose USB copies are disabled by default for flash capacity; ACK/EVENT messages
+remain visible. Diagnostic builds may enable `PAPERBRIQ_VERBOSE_USB_LOGS=1`.
+
+With verbose USB logs enabled, send **S** at 9600 baud to request the drying-chamber DHT22
 reading from ESP32 GPIO27. No arming or movement is required. See
 [DHT chamber check](../DHT_CHAMBER_CHECK.md) for firmware updates and app setup.
 
+## Current standalone function-test mode
+
+`PAPERBRIQ_STANDALONE_BENCH` now defaults to **0**. Setting it to 1 restores the
+legacy brief supervised checks with the ESP32 disconnected. The operator confirmed
+digital D4 -> thermostat S1, S2 -> heater MOSFET TRIG, and digital D3 -> pump TRIG.
+This enables local J/Y tests and bounded app runs, not automatic drying/pumping. The normal
+hardware-verification flags remain 0; unverified hardware is not certified by this mode.
+
+- **J:** ten-second heater enable, at least 60 seconds between starts.
+- **Y:** three-second pump enable, at least 10 seconds between starts.
+- **X:** stop the active test. Nothing starts at boot; repeated J/Y cannot extend it.
+
+Upload with actuator power off. Keep the failed ESP32 disconnected. For a powered
+test, keep the chamber empty, the heater fan continuously running and the thermostat
+probe installed with heating control in circuit. Never bridge S1/S2. Supply/prime
+the pump with water, secure its hoses/outlet and keep liquids away from electronics.
+Stay beside the physical emergency disconnect. Close the door, clear Stop/Emergency
+contacts and wait 2.5 seconds for settling before J or Y at 9600 baud. Do not arm
+with R or start production. Do not touch the heater to judge operation.
+
+This temporary mode does **not require an ESP32 temperature reading**; it relies
+on the external thermostat. A known reading of 40 C or above still blocks heat.
+Door/board loss, Stop/Emergency, X and UART frame faults still cancel outputs.
+Tests exclude each other, motion, arming and unlocking. No airflow, water-flow or
+physical success is measured. Software cannot stop a failed-short MOSFET.
+Missing pump suppression risks damage even during a brief test; the independent
+heater thermal cutoff is also still outstanding. These short checks do not establish
+safe regular operation. Keep the fan running while the heater cools afterward.
+
+Restore `PAPERBRIQ_STANDALONE_BENCH` to **0** after the checks. The normal modes
+below retain their hardware-verification gates and fresh-temperature requirement.
+See [app timer controls](../TIMED_CONTROLS.md) for the implemented production
+command path and its separate commissioning gates. Bench mode cannot bypass them.
+
+## Normal heater-test mode (standalone mode off)
+
+The sketch now initializes **digital D4 LOW** for heater enable. D4 is not A4:
+**A4 is the I2C data connection for the expanders and must not feed thermostat S1.**
+With all power off and the heater branch fuse removed, the intended control path is
+`Uno D4 -> W3230 S1`, then `W3230 S2 -> heater XY-MOS TRIG`.
+S1/S2 carry only the Uno enable signal in this arrangement; neither connects to 12 V.
+The thermostat supply VCC/GND remains separate. MOSFET control GND shares Uno GND.
+Provide a verified trigger pull-down (onboard or external) so an open thermostat
+contact or resetting Uno cannot leave the MOSFET trigger floating.
+
+With standalone mode off, `PAPERBRIQ_HEATER_VERIFIED` defaults to **0**: `J` reports verification pending
+and never drives D4 HIGH. Do not enable it until the corrected wiring, continuous
+heater-fan airflow, appropriate power wiring/fuse, and independent thermal cutoff
+have been verified. A 10 A or 15 A current fuse is **not** a thermal cutoff.
+The fan was reported spinning; wiring and overtemperature protection remain pending.
+
+Once verified and enabled, the local USB-only `J` command requests a three-second
+heater-enable test. It requires the machine stopped (not armed), closed door, healthy
+expanders and Stop/Emergency contacts, no other test, 2.5 seconds of settling, and a
+successful `S` temperature reply less than five seconds old and below 40 C.
+Send `X`, wait for settling, then `S`; only after valid values appear may `J` run.
+The 40 C guard is a bench-test limit, not a production drying temperature.
+Repeated `J` does not extend a pulse; another pulse requires another successful `S`.
+`X`, a UART frame fault, invalid/stale temperature, or lost/open interlocks remove
+the enable signal. Arming, motion and unlocking are blocked during a heater test.
+The firmware cannot measure airflow or prove that the thermostat or heater operates.
+Software timing does not replace independent thermal protection.
+
+The thermostat must also request heat for D4 to reach TRIG. A successful D4 pulse
+does not prove heat production. There is no automatic drying stage; app timer
+commands require standalone mode. Keep the heater fan running during cooling; the heater test does not
+control that separately powered fan. No firmware has been uploaded by this change.
+
 ## Motor signal wiring
+
+### Normal pump-test mode (standalone mode off)
+
+The operator reports a **12 V / 6 A pump**, water available for the test, and no
+external suppression diode. Its motor type, startup/stall current, built-in
+suppression and D3 connection still need verification. Prototype status does not
+eliminate inductive switch-off spikes; select suppression for this pump and driver.
+Do not assume the 3 A 1N5408 discussed for the lock is suitable for the 6 A pump.
+
+With power off, the proposed control wiring is **Uno digital D3 -> pump XY-MOS
+TRIG**, with the module's small GND connected to common Uno/supply ground.
+Confirm a trigger pull-down, onboard or external, for resets. Use fused 12 V to
+VIN+, supply negative to VIN-, and the pump across OUT+/OUT-. OUT- must not be
+connected directly to supply negative, which would bypass the MOSFET. Load current
+must use appropriate power wiring, not breadboard rails or Dupont jumpers. Verify
+the module, fuse, wiring and power supply against startup/stall current as well as
+the stated 6 A rating. No fuse or suppression component rating is selected here.
+
+With standalone mode off, `PAPERBRIQ_PUMP_VERIFIED` defaults to **0**, keeping D3 LOW. The pump feature has
+its own verification flag; confirming the heater does not enable the pump.
+Once the pump hardware is verified and enabled, **Y** in Uno USB Serial Monitor
+at 9600 baud requests a three-second pump pulse. Use `X`, wait at least 2.5 seconds
+for movement to settle, and ensure the pump is supplied/primed with water as its
+manufacturer requires before `Y`. Never assume the firmware detects dry running.
+
+Door closed, both expanders online and healthy Stop/Emergency contacts are required.
+The machine must be stopped and no heater, fan, unlock, indicator, component test or
+production cycle may be running. Repeating Y during a pulse cannot extend it;
+starts are separated by at least 10 seconds. X, a UART frame fault, a door/board
+fault or an opened Stop/Emergency contact cancels the output. Successful timing
+only proves a command was issued: it does not prove water flow or pump health.
+This is a separate supervised test; it is not added to automatic production, app
+commands or the all-components check. No firmware has been uploaded by this change.
 
 | Motor | BTS7960 input | Arduino Uno |
 | --- | --- | --- |

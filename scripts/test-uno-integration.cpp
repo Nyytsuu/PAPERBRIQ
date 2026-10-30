@@ -21,6 +21,252 @@ int main(int argc, char **argv) {
   assert(motorsOff());
   assert(!mixerGateServo.attached() && !molderServo.attached());
   assert(!diagnosticActive && !chamber.fanOn && !chamber.unlockOn);
+  assert(testOutputs[HEATER_ENABLE_PIN] == LOW);
+  assert(testOutputs[PUMP_ENABLE_PIN] == LOW && !pumpTestActive);
+  if (mode == "production_disabled") {
+    advance(3000);
+    char p[]="CMD|disabled-pump|PP:1234ABCD:60";
+    char d[]="CMD|disabled-dry|DD:2345ABCD:1800";
+    handleRemoteCommandFrame(p); handleRemoteCommandFrame(d);
+    handlePaperSignal('0'); advance(250); handlePaperSignal('1');
+    assert(!production.active() && testOutputs[3]==LOW && testOutputs[4]==LOW);
+    assert(espLink.output.find("production_blocked")!=std::string::npos);
+    puts("Default build: uncommissioned production requests cannot enable outputs"); return 0;
+  }
+  if (mode == "production") {
+    const auto cmd = [](const char *s) { std::string line(s); handleRemoteCommandFrame(&line[0]); };
+    advance(3000);
+    cmd("CMD|dry-start|DD:1234ABCD:60");
+    assert(production.on() && testOutputs[4] == HIGH && motorsOff());
+    assert(!armMotorTest() && !startAutomaticProcess() && !startComponentTest());
+    advance(2000);
+    cmd("CMD|dry-edit|DT:1234ABCD:90"); assert(production.total == 90 && production.elapsed(millis()) == 2);
+    cmd("CMD|dry-stale|DT:1234ABCE:100"); assert(production.total == 90);
+    cmd("CMD|dry-over|DT:1234ABCD:3601"); assert(production.total == 90);
+    cmd("CMD|dry-shorten|DT:1234ABCD:1"); assert(!production.on() && testOutputs[4] == LOW);
+    cmd("CMD|dry-replay|DD:1234ABCD:60"); assert(!production.active());
+    cmd("CMD|pump-arm|PP:2345ABCD:20"); assert(production.phase == ProductionTimer::WAITING && testOutputs[3] == LOW);
+    handlePaperSignal('0'); advance(250); handlePaperSignal('1'); assert(!production.on());
+    assert(armMotorTest()); assert(startAutomaticProcess());
+    for (int i=0;i<2000 && automaticProcessState!=PROCESS_SHREDDING_AND_MIXING;++i) advance(10);
+    assert(automaticProcessState==PROCESS_SHREDDING_AND_MIXING);
+    handlePaperSignal('1'); assert(!production.on());
+    handlePaperSignal('0'); advance(1600); handlePaperSignal('1'); assert(!production.on());
+    handlePaperSignal('0'); advance(250); handlePaperSignal('1');
+    assert(production.on() && testOutputs[3] == HIGH);
+    const auto startAt = production.startedAt;
+    advance(11000); assert(automaticProcessState==PROCESS_MIXER_FINISHING && production.on());
+    handlePaperSignal('0'); advance(250); handlePaperSignal('1'); assert(production.startedAt == startAt);
+    cmd("CMD|pump-edit|PT:2345ABCD:12");
+    advance(1000); assert(!production.on() && testOutputs[3] == LOW);
+    cmd("CMD|prod-stop|STOP"); assert(motorsOff() && !production.active());
+    for (int fault=0;fault<6;++fault) {
+      advance(3000);
+      std::string line = "CMD|fault-" + std::to_string(fault) + "|DD:3456ABC" + std::to_string(fault) + ":60";
+      handleRemoteCommandFrame(&line[0]); assert(testOutputs[4] == HIGH);
+      if(fault==0) Wire.inputs[0x24] |= ChamberControl::DOOR;
+      if(fault==1) Wire.inputs[0x20] |= STOP_BUTTON_MASK;
+      if(fault==2) Wire.inputs[0x20] |= EMERGENCY_BUTTON_MASK;
+      if(fault==3) Wire.missing[0x24] = true;
+      if(fault==4) Wire.missing[0x20] = true;
+      if(fault==5) { espLink.input.push_back('?'); serviceBridgeCommands(); advance(750); }
+      advance(150); assert(testOutputs[4] == LOW && !production.active());
+      Wire.inputs[0x24] &= ~ChamberControl::DOOR;
+      Wire.inputs[0x20] &= ~(STOP_BUTTON_MASK|EMERGENCY_BUTTON_MASK);
+      Wire.missing[0x24] = Wire.missing[0x20] = false;
+    }
+    advance(3000); cmd("CMD|no-paper|PP:4567ABCD:20");
+    assert(production.phase == ProductionTimer::WAITING);
+    assert(armMotorTest()); assert(startAutomaticProcess());
+    advance(20000);
+    assert(softwareStopLatched && !production.active() && motorsOff() && testOutputs[3] == LOW);
+    puts("Production integration: actual sketch handles IR batch, mixer hold, live edits, replay, limits and hardware stop paths");
+    return 0;
+  }
+  if (mode == "timed_remote") {
+    assert(PAPERBRIQ_STANDALONE_BENCH);
+    advance(3000);
+    for (const char *invalid : {"HEATER:0", "HEATER:11", "HEATER:01", "HEATER:1.0", "PUMP:4", "PUMP:-1", "PUMP:1x", "PUMP:"}) {
+      assert(timedCommandSeconds(invalid) == 0);
+      std::string frame = "CMD|invalid-" + std::string(invalid).substr(0, 4) + "|" + invalid;
+      handleRemoteCommandFrame(&frame[0]);
+      assert(!heaterTestActive && !pumpTestActive && testOutputs[3] == LOW && testOutputs[4] == LOW);
+    }
+    for (int n = 1; n <= 10; ++n) {
+      advance(60000);
+      std::string frame = "CMD|heat-" + std::to_string(n) + "|HEATER:" + std::to_string(n);
+      std::string replay = frame;
+      handleRemoteCommandFrame(&frame[0]);
+      assert(heaterTestActive && heaterDurationMs == (unsigned)n * 1000);
+      advance(n * 1000 - 10); assert(heaterTestActive);
+      handleRemoteCommandFrame(&replay[0]); // Same ID cannot extend the run.
+      advance(10); assert(!heaterTestActive && testOutputs[4] == LOW);
+    }
+    for (int n = 1; n <= 3; ++n) {
+      advance(10000);
+      std::string frame = "CMD|pump-" + std::to_string(n) + "|PUMP:" + std::to_string(n);
+      handleRemoteCommandFrame(&frame[0]); assert(pumpTestActive);
+      char overlapping[] = "CMD|overlap|HEATER:10";
+      handleRemoteCommandFrame(overlapping); assert(!heaterTestActive);
+      advance(n * 1000 - 10); assert(pumpTestActive);
+      advance(10); assert(!pumpTestActive && testOutputs[3] == LOW);
+    }
+    advance(60000);
+    char start[] = "CMD|final-heat|HEATER:10"; handleRemoteCommandFrame(start);
+    char stop[] = "CMD|cancel|STOP"; handleRemoteCommandFrame(stop);
+    assert(!heaterTestActive && testOutputs[4] == LOW);
+    puts("Timed UART: strict limits, every duration, duplicate replay, mutual exclusion and STOP passed");
+    return 0;
+  }
+  if (mode == "standalone_bench") {
+    assert(PAPERBRIQ_STANDALONE_BENCH && !PAPERBRIQ_HEATER_VERIFIED && !PAPERBRIQ_PUMP_VERIFIED);
+    advance(3000);
+    assert(!heaterReadingValid && espLink.input.empty());
+    Serial.input.push_back('J'); serviceSerialCommands();
+    assert(heaterTestActive && testOutputs[4] == HIGH && motorsOff());
+    startPumpTest(); assert(!pumpTestActive);
+    assert(!armMotorTest() && !startAutomaticProcess() && !startComponentTest());
+    advance(9900);
+    assert(heaterTestActive && testOutputs[4] == HIGH);
+    startHeaterTest(); advance(110);
+    assert(!heaterTestActive && testOutputs[4] == LOW);
+    startHeaterTest(); assert(!heaterTestActive); // 60s between starts.
+    advance(49980); startHeaterTest(); assert(!heaterTestActive);
+    advance(20); startHeaterTest(); assert(heaterTestActive);
+    Serial.input.push_back('X'); serviceSerialCommands();
+    assert(!heaterTestActive && testOutputs[4] == LOW);
+    advance(3000);
+    Serial.input.push_back('Y'); serviceSerialCommands();
+    assert(pumpTestActive && testOutputs[3] == HIGH);
+    startHeaterTest(); assert(!heaterTestActive);
+    advance(2900); startPumpTest(); advance(110);
+    assert(!pumpTestActive && testOutputs[3] == LOW);
+    startPumpTest(); assert(!pumpTestActive);
+    for (int output = 0; output < 2; ++output) {
+      for (int fault = 0; fault < 6; ++fault) {
+        advance(60000);
+        if (output == 0) startHeaterTest(); else startPumpTest();
+        assert(testOutputs[output == 0 ? 4 : 3] == HIGH);
+        if (fault == 0) Wire.inputs[0x24] |= ChamberControl::DOOR;
+        if (fault == 1) Wire.inputs[0x20] |= STOP_BUTTON_MASK;
+        if (fault == 2) Wire.inputs[0x20] |= EMERGENCY_BUTTON_MASK;
+        if (fault == 3) Wire.missing[0x20] = true;
+        if (fault == 4) Wire.missing[0x24] = true;
+        if (fault == 5) { espLink.input.push_back('?'); serviceBridgeCommands(); advance(750); }
+        advance(10);
+        assert(testOutputs[3] == LOW && testOutputs[4] == LOW && motorsOff());
+        Wire.inputs[0x24] &= (uint8_t)~ChamberControl::DOOR;
+        Wire.inputs[0x20] &= (uint8_t)~(STOP_BUTTON_MASK | EMERGENCY_BUTTON_MASK);
+        Wire.missing[0x20] = false; Wire.missing[0x24] = false;
+        initializeControlIo(); initializeStatusIo(); advance(100);
+      }
+    }
+    puts("Standalone bench: no ESP32 required; pulses/cooldowns, exclusions and all stop paths passed");
+    return 0;
+  }
+  if (mode == "pump_blocked") {
+    advance(3000);
+    Serial.input.push_back('Y'); serviceSerialCommands();
+    assert(!pumpTestActive && testOutputs[3] == LOW && motorsOff());
+    assert(Serial.output.find("wiring/suppression verification pending") != std::string::npos);
+    puts("Pump default build: unverified hardware cannot energize D3");
+    return 0;
+  }
+  if (mode == "pump") {
+    assert(PAPERBRIQ_PUMP_VERIFIED && PAPERBRIQ_HEATER_VERIFIED);
+    startPumpTest(); assert(!pumpTestActive); // Mechanical settling.
+    advance(3000);
+    Serial.input.push_back('Y'); serviceSerialCommands();
+    assert(pumpTestActive && testOutputs[3] == HIGH && motorsOff() && testOutputs[4] == LOW);
+    assert(!armMotorTest() && strcmp(lastArmRejectReason, "pump_active") == 0);
+    assert(!startAutomaticProcess() && !startComponentTest());
+    assert(!runChamberCommand("UNLOCK") && !runChamberCommand("FAN_TEST"));
+    heaterReadingValid = true; heaterReadingAt = millis(); heaterTemperature = 25;
+    startHeaterTest(); assert(!heaterTestActive && testOutputs[4] == LOW);
+    advance(2900); startPumpTest(); advance(110);
+    assert(!pumpTestActive && testOutputs[3] == LOW);
+    startPumpTest(); assert(!pumpTestActive); // Cooldown.
+    advance(7000); startPumpTest(); assert(pumpTestActive);
+    Serial.input.push_back('X'); serviceSerialCommands();
+    assert(!pumpTestActive && testOutputs[3] == LOW && softwareStopLatched);
+    advance(10000);
+    heaterReadingValid = true; heaterReadingAt = millis(); heaterTemperature = 25;
+    startHeaterTest(); assert(heaterTestActive);
+    startPumpTest(); assert(!pumpTestActive && testOutputs[3] == LOW);
+    stopHeaterTest();
+    for (int fault = 0; fault < 6; ++fault) {
+      advance(10000); startPumpTest(); assert(pumpTestActive);
+      if (fault == 0) Wire.inputs[0x24] |= ChamberControl::DOOR;
+      if (fault == 1) Wire.inputs[0x20] |= STOP_BUTTON_MASK;
+      if (fault == 2) Wire.inputs[0x20] |= EMERGENCY_BUTTON_MASK;
+      if (fault == 3) Wire.missing[0x20] = true;
+      if (fault == 4) Wire.missing[0x24] = true;
+      if (fault == 5) { espLink.input.push_back('?'); serviceBridgeCommands(); advance(750); }
+      advance(10);
+      assert(!pumpTestActive && testOutputs[3] == LOW && motorsOff());
+      Wire.inputs[0x24] &= (uint8_t)~ChamberControl::DOOR;
+      Wire.inputs[0x20] &= (uint8_t)~(STOP_BUTTON_MASK | EMERGENCY_BUTTON_MASK);
+      Wire.missing[0x20] = false; Wire.missing[0x24] = false;
+      initializeControlIo(); initializeStatusIo(); advance(100);
+    }
+    puts("Pump: timed pulse, repeat/cooldown, mutual exclusion, X, door, contacts, I2C loss and UART fault passed");
+    return 0;
+  }
+  if (mode == "heater_blocked") {
+    advance(3000);
+    heaterReadingValid = true; heaterReadingAt = millis(); heaterTemperature = 25;
+    startHeaterTest();
+    assert(!heaterTestActive && testOutputs[HEATER_ENABLE_PIN] == LOW);
+    assert(Serial.output.find("verification pending") != std::string::npos);
+    puts("Heater default build: hardware verification gate keeps D4 LOW");
+    return 0;
+  }
+  if (mode == "heater") {
+    assert(PAPERBRIQ_HEATER_VERIFIED);
+    advance(3000);
+    startHeaterTest(); assert(!heaterTestActive); // No sensor reading.
+    const auto fresh = []() {
+      requestDhtCheck();
+      std::string frame = "DHT|" + std::to_string(dhtCheckSequence) + "|OK|25.0|60.0\n";
+      for (char c : frame) espLink.input.push_back(c);
+      serviceBridgeCommands();
+    };
+    fresh(); heaterTemperature = 40; startHeaterTest(); assert(!heaterTestActive);
+    fresh(); startHeaterTest();
+    assert(heaterTestActive && testOutputs[4] == HIGH && motorsOff());
+    assert(!armMotorTest() && !startAutomaticProcess() && !startComponentTest());
+    assert(!runChamberCommand("UNLOCK"));
+    advance(2900); startHeaterTest(); advance(110);
+    assert(!heaterTestActive && testOutputs[4] == LOW && !heaterReadingValid);
+    startHeaterTest(); assert(!heaterTestActive);
+    fresh(); startHeaterTest();
+    Wire.inputs[0x24] |= ChamberControl::DOOR; advance(10);
+    assert(!heaterTestActive && testOutputs[4] == LOW);
+    Wire.inputs[0x24] &= (uint8_t)~ChamberControl::DOOR; advance(100);
+    for (uint8_t mask : {STOP_BUTTON_MASK, EMERGENCY_BUTTON_MASK}) {
+      fresh(); startHeaterTest(); assert(heaterTestActive);
+      Wire.inputs[0x20] |= mask; advance(10);
+      assert(!heaterTestActive && testOutputs[4] == LOW);
+      Wire.inputs[0x20] &= (uint8_t)~mask; advance(100);
+    }
+    for (uint8_t address : {CONTROL_IO_ADDRESS, STATUS_IO_ADDRESS}) {
+      fresh(); startHeaterTest(); assert(heaterTestActive);
+      Wire.missing[address] = true; advance(10);
+      assert(!heaterTestActive && testOutputs[4] == LOW);
+      Wire.missing[address] = false;
+      initializeControlIo(); initializeStatusIo(); advance(100);
+    }
+    fresh(); heaterReadingAt = millis() - 4900UL; startHeaterTest();
+    assert(heaterTestActive); advance(100);
+    assert(!heaterTestActive && testOutputs[4] == LOW);
+    fresh(); startHeaterTest(); Serial.input.push_back('X'); serviceSerialCommands();
+    assert(!heaterTestActive && testOutputs[4] == LOW && softwareStopLatched);
+    advance(3000); fresh(); startHeaterTest(); assert(heaterTestActive);
+    espLink.input.push_back('?'); serviceBridgeCommands(); advance(750);
+    assert(!heaterTestActive && testOutputs[4] == LOW && softwareStopLatched);
+    puts("Heater: bounded pulse, repeat rejection, temperature freshness, interlocks, I2C loss, X/UART stop passed");
+    return 0;
+  }
   if (mode == "reset_ack") {
     advance(1100);
     Wire.inputs[0x24] |= ChamberControl::DOOR;

@@ -512,6 +512,17 @@ function createMysqlStore(databaseUrl) {
         [deviceId, JSON.stringify(health)]
       );
     },
+    async getProductionSettings(deviceId) {
+      await ensureControlSchema();
+      const [rows] = await pool.execute('SELECT settings FROM device_production_settings WHERE device_id=?', [deviceId]);
+      return rows[0] ? (typeof rows[0].settings === 'string' ? JSON.parse(rows[0].settings) : rows[0].settings) : { pumpSeconds: null, dryingSeconds: null };
+    },
+    async saveProductionSettings(deviceId, settings) {
+      await ensureControlSchema();
+      const saved = { ...settings, updatedAt: new Date().toISOString() };
+      await pool.execute('INSERT INTO device_production_settings(device_id, settings) VALUES(?,?) ON DUPLICATE KEY UPDATE settings=VALUES(settings)', [deviceId, JSON.stringify(saved)]);
+      return saved;
+    },
     async getMachineHealth(deviceId) {
       await ensureControlSchema();
       const [rows] = await pool.execute(
@@ -1558,6 +1569,7 @@ function liveSensorStatus(name, value, fallbackStatus) {
 }
 
 async function ensureDeviceControlSchema(pool) {
+  await pool.execute('CREATE TABLE IF NOT EXISTS device_production_settings (device_id VARCHAR(80) PRIMARY KEY, settings JSON NOT NULL)');
   await pool.execute(
     `CREATE TABLE IF NOT EXISTS device_machine_health (
        device_id VARCHAR(80) PRIMARY KEY,

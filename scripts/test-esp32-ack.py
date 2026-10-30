@@ -5,9 +5,13 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 source = (root / "firmware/PaperBriqMonitor/PaperBriqMonitor.ino").read_text()
+timed_header = (root / "firmware/PaperBriqMonitor/TimedCommands.h").read_text()
+assert timed_header == (root / "firmware/ArduinoUnoMotorTest/TimedCommands.h").read_text()
+production_header = (root / "firmware/PaperBriqMonitor/ProductionTimer.h").read_text()
+assert production_header == (root / "firmware/ArduinoUnoMotorTest/ProductionTimer.h").read_text()
 names = ["cacheFinalCommand", "postCommandAck", "serviceAckReport",
          "dispatchCommand", "finishPendingCommand", "handleUnoAck",
-         "serviceUnoLink", "loop"]
+         "handleUnoHealth", "handleProductionReport", "serviceUnoLink", "loop"]
 functions = []
 for name in names:
     # Top-level function closing braces are unindented in the actual sketch.
@@ -28,6 +32,7 @@ struct String : std::string {
   using std::string::string;
   using std::string::operator=;
   String(const std::string &s) : std::string(s) {}
+  String(uint32_t n) : std::string(std::to_string(n)) {}
   String substring(size_t a, size_t b = std::string::npos) const {
     return substr(a, b == std::string::npos ? b : b-a);
   }
@@ -76,7 +81,15 @@ void enqueueDeviceEvent(const String &type,const String &,const String &,const S
   if(type=="controller_link_timeout") ++timeoutEvents;
 }
 void handleUnoEvent(const String &) {}
-void handleUnoHealth(const String &) {}
+String healthProbeId;
+unsigned long lastHealthProbeAt=0,healthReplyAt=0;
+const unsigned long HEALTH_REPLY_TIMEOUT_MS=5000;
+bool haveHealthReply=false,healthControlIo=false,healthStopClosed=false,healthEmergencyClosed=false;
+bool healthIndicatorIo=false,healthArmed=false,healthChamberSupported=false,healthDoorClosed=false;
+bool healthFanOn=false,healthUnlockOn=false,healthTestActive=false,healthTimedVersion=false;
+bool healthTimedSupported=false,healthHeaterOn=false,healthPumpOn=false,healthHeaterReady=false,healthPumpReady=false;
+String productionJson; unsigned long productionReplyAt=0;
+void servicePaperSignal() {}
 void replyDhtCheck(const String &) {}
 void sampleChamberSensor() {}
 void serviceSensorSerial() {}
@@ -101,6 +114,44 @@ void resetTest() {
   httpCalls=otherNetworkCalls=timeoutEvents=0; clockMs=10000;
 }
 int main() {
+  resetTest(); healthProbeId="prod-test"; lastHealthProbeAt=clockMs;
+  handleProductionReport("PROD|prod-test|120|3600|1|1|1|2|305441741|60|20|40");
+  assert(productionJson.find("\"remainingSeconds\":40")!=std::string::npos);
+  String validProduction = productionJson;
+  handleProductionReport("PROD|wrong|120|3600|1|1|1|2|305441741|60|20|40");
+  handleProductionReport("PROD|prod-test|120|3600|1|1|1|2|305441741|60|20|999");
+  assert(productionJson==validProduction);
+  resetTest(); dispatchCommand("prod-arm","PP:1234ABCD:120");
+  assert(unoLink.output=="CMD|prod-arm|PP:1234ABCD:120\n");
+  inject("ACK|prod-arm|COMPLETED|production_applied\n"); serviceUnoLink();
+  assert(lastCommandStatus=="completed");
+  resetTest(); healthProbeId="health-test"; lastHealthProbeAt=clockMs;
+  handleUnoHealth("HEALTH|health-test|1|1|1|1|0|1|0|0|0|1|0|0|1|1");
+  assert(haveHealthReply && healthTimedVersion && healthTimedSupported);
+  assert(healthHeaterReady && healthPumpReady && !healthHeaterOn && !healthPumpOn);
+  healthProbeId="health-test";
+  handleUnoHealth("HEALTH|health-test|1|1|1|1|0|1|0|0|0|1|1|0|0|0");
+  assert(healthHeaterOn && !healthHeaterReady && !healthPumpReady);
+  healthProbeId="health-test";
+  handleUnoHealth("HEALTH|health-test|1|1|1|1|0|1|0|0|0|1|x|0|1|1");
+  assert(healthProbeId=="health-test" && healthHeaterOn); // Malformed frame ignored.
+  handleUnoHealth("HEALTH|wrong-id|1|1|1|1|0");
+  assert(healthTimedVersion && healthProbeId=="health-test");
+  handleUnoHealth("HEALTH|health-test|1|1|1|1|0|1|0|0|0");
+  assert(healthChamberSupported && !healthTimedVersion && !healthTimedSupported);
+  assert(!healthHeaterOn && !healthHeaterReady && !healthPumpReady);
+  for (const char *action : {"heater:1", "heater:10", "pump:1", "pump:3"}) {
+    resetTest();
+    dispatchCommand("timed", action);
+    String upper(action); upper.toUpperCase();
+    assert(unoLink.output == String("CMD|timed|") + upper + "\n");
+    inject("ACK|timed|COMPLETED|timed_run_started\n"); serviceUnoLink();
+    assert(lastCommandStatus == "completed" && pendingCommandId.empty());
+  }
+  for (const char *action : {"heater:0", "heater:11", "pump:4", "pump:-1", "heater:1.5", "pump:01"}) {
+    resetTest(); dispatchCommand("invalid", action);
+    assert(unoLink.output.empty() && pendingCommandId.empty());
+  }
   resetTest();
   dispatchCommand("r1","reset");
   assert(unoLink.output=="CMD|r1|RESET\n");
@@ -153,7 +204,7 @@ int main() {
 build = root / "frontend/android/app/build/qa/esp32-ack-native"
 build.mkdir(parents=True, exist_ok=True)
 cpp = build / "ack-test.cpp"
-cpp.write_text(stub + "\n" + "\n\n".join(functions) + "\n" + tests)
+cpp.write_text((timed_header + production_header).replace("#pragma once", "") + "\n" + stub + "\n" + "\n\n".join(functions) + "\n" + tests)
 compiler = shutil.which("g++")
 if not compiler:
     raise SystemExit("g++ is required for this hardware-free test")

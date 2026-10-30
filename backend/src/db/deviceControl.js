@@ -88,7 +88,9 @@ function timeValue(value) {
 
 function inferProcessState(events, commands) {
   const latestStateEvent = events.find((event) => event.processState);
-  const latest = commands[0];
+  // Output timers are reported separately; editing one must not erase the
+  // forming process state or mark its current stage interrupted.
+  const latest = commands.find(command => !/^(PP|DD|PT|DT):/.test(command.command));
   if (!latestStateEvent) return commandProcessState(latest);
   if (!latest) return latestStateEvent.processState;
 

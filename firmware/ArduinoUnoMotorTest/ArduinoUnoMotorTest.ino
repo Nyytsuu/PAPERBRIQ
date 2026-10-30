@@ -3,6 +3,9 @@
 #include <SoftwareSerial.h>
 #include <Wire.h>
 #include "ChamberControl.h"
+#include "TimedCommands.h"
+#include "ProductionTimer.h"
+#include "ProductionLimits.h"
 #include <stdlib.h>
 #include <math.h>
 
@@ -12,6 +15,67 @@ bool runChamberCommand(const char *action);
 void printChamberStatus();
 bool startComponentTest();
 void serviceComponentTest();
+void stopHeaterTest();
+void serviceHeaterTest();
+void stopPumpTest();
+void servicePumpTest();
+void startPumpTest();
+void startHeaterTest();
+bool benchConditionsReady();
+void serviceProduction();
+void handlePaperSignal(char value);
+ProductionTimer production;
+bool paperClearSeen = false;
+bool productionPumpWasOn = false;
+unsigned long paperSignalAt = 0;
+
+// Legacy short checks are opt-in; production commands use separate hardware
+// verification and operating limits, even when bench mode is enabled.
+// Does NOT certify hardware or enable automatic drying/pumping. The heater's
+// physical thermostat and continuously powered fan must remain in circuit.
+// User confirmed D3/D4 wiring for supervised short tests. No automatic output.
+// Set to 0 after these checks to restore the normal hardware-verification gates.
+#ifndef PAPERBRIQ_STANDALONE_BENCH
+#define PAPERBRIQ_STANDALONE_BENCH 0
+#endif
+#ifndef PAPERBRIQ_VERBOSE_USB_LOGS
+#define PAPERBRIQ_VERBOSE_USB_LOGS PAPERBRIQ_STANDALONE_BENCH
+#endif
+#if PAPERBRIQ_VERBOSE_USB_LOGS
+#define USB_LOG Serial
+#else
+// Keep UART ACK/events and all USB input commands; omit verbose USB copies to
+// leave flash space for production timing. Diagnostic builds can restore them.
+struct QuietUsbLog {
+  template<class T> void print(const T &) {}
+  template<class T> void println(const T &) {}
+  void println() {}
+} USB_LOG;
+#endif
+const unsigned long HEATER_TEST_PULSE_MS = PAPERBRIQ_STANDALONE_BENCH ? 10000UL : 3000UL;
+bool heaterBenchUsed = false;
+
+// 12 V / 6 A pump: verify D3 trigger, fused power, suitable inductive-load
+// suppression and water supply before enabling this supervised bench test.
+#ifndef PAPERBRIQ_PUMP_VERIFIED
+#define PAPERBRIQ_PUMP_VERIFIED 0
+#endif
+const uint8_t PUMP_ENABLE_PIN = 3;
+bool pumpTestActive = false, pumpHasRun = false;
+unsigned long pumpTestAt = 0;
+unsigned long pumpDurationMs = 3000;
+unsigned long heaterDurationMs = HEATER_TEST_PULSE_MS;
+
+// Enable only after verifying D4 -> thermostat S1, S2 -> MOSFET TRIG,
+// independent thermal cutoff, fused load wiring and continuous heater airflow.
+#ifndef PAPERBRIQ_HEATER_VERIFIED
+#define PAPERBRIQ_HEATER_VERIFIED 0
+#endif
+const uint8_t HEATER_ENABLE_PIN = 4;
+bool heaterTestActive = false;
+bool heaterReadingValid = false;
+unsigned long heaterTestAt = 0, heaterReadingAt = 0;
+float heaterTemperature = 0;
 
 // PaperBriq Arduino Uno shredder, mixer, and mixer-gate bench test.
 // Test only unloaded, securely clamped motors with a fused 12 V supply and
@@ -67,7 +131,7 @@ const unsigned long STATUS_SELF_TEST_STEP_MS = 700;
 const uint8_t STATUS_SELF_TEST_STEP_COUNT = 5;
 
 // Operator-confirmed LED expander 0x24: P2 door NC to GND, P5 fan, P6 unlock.
-// P2 remains HIGH/released. P7 stays HIGH/off; no heater output is enabled.
+// P2 remains HIGH/released. P7 stays HIGH/off; heater enable uses Uno D4.
 ChamberControl chamber;
 unsigned long lastDoorPollAtMs = 0;
 uint8_t lastStatusInputs = 0xFF;
@@ -267,7 +331,7 @@ bool initializeControlIo() {
   uint8_t value = 0xFF;
   if (!writeControlIo(value) || !readControlIo(value)) {
     controlIoOnline = false;
-    Serial.println(F("CONTROL BUTTONS OFFLINE: PCF8574 not found at 0x20"));
+    USB_LOG.println(F("CONTROL BUTTONS OFFLINE: PCF8574 not found at 0x20"));
     return false;
   }
 
@@ -278,10 +342,10 @@ bool initializeControlIo() {
   seedButton(emergencyButton,
              (value & EMERGENCY_BUTTON_MASK) != 0, nowMs);
   controlIoOnline = true;
-  Serial.print(F("CONTROL BUTTONS ONLINE at 0x20; stop contact is "));
-  Serial.print(stopButton.stableActive ? F("OPEN") : F("CLOSED"));
-  Serial.print(F("; emergency contact is "));
-  Serial.println(emergencyButton.stableActive ? F("OPEN") : F("CLOSED"));
+  USB_LOG.print(F("CONTROL BUTTONS ONLINE at 0x20; stop contact is "));
+  USB_LOG.print(stopButton.stableActive ? F("OPEN") : F("CLOSED"));
+  USB_LOG.print(F("; emergency contact is "));
+  USB_LOG.println(emergencyButton.stableActive ? F("OPEN") : F("CLOSED"));
   return true;
 }
 
@@ -291,11 +355,11 @@ bool initializeStatusIo() {
   // HIGH switches every active-low indicator off and leaves unused pins safe.
   if (!writeStatusIo(0xFF)) {
     statusIoOnline = false;
-    Serial.println(F("STATUS LIGHTS OFFLINE: PCF8574 not found at 0x24"));
+    USB_LOG.println(F("STATUS LIGHTS OFFLINE: PCF8574 not found at 0x24"));
     return false;
   }
   statusIoOnline = true;
-  Serial.println(F("STATUS LIGHTS ONLINE at 0x24"));
+  USB_LOG.println(F("STATUS LIGHTS ONLINE at 0x24"));
   return true;
 }
 
@@ -437,7 +501,7 @@ void stopAllMotors(bool printMessage = true) {
   lastMotorStoppedAtMs = millis();
 
   if (printMessage) {
-    Serial.println(F("ALL MOTORS: stopped"));
+    USB_LOG.println(F("ALL MOTORS: stopped"));
   }
 }
 
@@ -453,7 +517,7 @@ void releaseMixerGateServo(bool printMessage = true) {
   digitalWrite(MIXER_GATE_SERVO_PIN, LOW);
 
   if (printMessage) {
-    Serial.println(F("MIXER GATE: servo released; no holding torque"));
+    USB_LOG.println(F("MIXER GATE: servo released; no holding torque"));
   }
 }
 
@@ -465,7 +529,7 @@ void releaseMolderServo(bool printMessage = true) {
   digitalWrite(MOLDER_SERVO_PIN, LOW);
 
   if (printMessage) {
-    Serial.println(F("MOLDER: servo released; no holding torque"));
+    USB_LOG.println(F("MOLDER: servo released; no holding torque"));
   }
 }
 
@@ -483,11 +547,11 @@ void setMixerGateAngle(uint8_t angle,
     mixerGateServo.write(safeAngle);
   }
 
-  Serial.print(F("MIXER GATE: moving to "));
-  Serial.print(positionName);
-  Serial.print(F(" at "));
-  Serial.print(safeAngle);
-  Serial.println(F(" degrees; servo holding position"));
+  USB_LOG.print(F("MIXER GATE: moving to "));
+  USB_LOG.print(positionName);
+  USB_LOG.print(F(" at "));
+  USB_LOG.print(safeAngle);
+  USB_LOG.println(F(" degrees; servo holding position"));
 }
 
 void setMolderAngle(uint8_t angle,
@@ -502,11 +566,11 @@ void setMolderAngle(uint8_t angle,
     molderServo.write(safeAngle);
   }
 
-  Serial.print(F("MOLDER: moving to "));
-  Serial.print(positionName);
-  Serial.print(F(" at "));
-  Serial.print(safeAngle);
-  Serial.println(F(" degrees; servo holding position"));
+  USB_LOG.print(F("MOLDER: moving to "));
+  USB_LOG.print(positionName);
+  USB_LOG.print(F(" at "));
+  USB_LOG.print(safeAngle);
+  USB_LOG.println(F(" degrees; servo holding position"));
 }
 
 void closeAndHoldBothGates() {
@@ -518,12 +582,12 @@ void moveMixerGate(uint8_t angle, const __FlashStringHelper *positionName) {
   if (diagnosticActive) return;
   if (!chamberMotionReady()) return;
   if (softwareStopLatched) {
-    Serial.println(F("SERVO COMMAND REJECTED: send R to arm first"));
+    USB_LOG.println(F("SERVO COMMAND REJECTED: send R to arm first"));
     return;
   }
 
   if (automaticProcessIsActive()) {
-    Serial.println(F("SERVO COMMAND REJECTED: automatic process is running"));
+    USB_LOG.println(F("SERVO COMMAND REJECTED: automatic process is running"));
     return;
   }
 
@@ -531,15 +595,15 @@ void moveMixerGate(uint8_t angle, const __FlashStringHelper *positionName) {
   // gate command after the mechanical coast-down interval.
   if (runState != STATE_IDLE) {
     stopAllMotors(false);
-    Serial.println(F("MIXER GATE: motor stopped; wait 2.5 s, then resend O/C"));
+    USB_LOG.println(F("MIXER GATE: motor stopped; wait 2.5 s, then resend O/C"));
     return;
   }
 
   const unsigned long stoppedForMs = millis() - lastMotorStoppedAtMs;
   if (stoppedForMs < DIRECTION_CHANGE_PAUSE_MS) {
-    Serial.print(F("MIXER GATE: wait another "));
-    Serial.print(DIRECTION_CHANGE_PAUSE_MS - stoppedForMs);
-    Serial.println(F(" ms for motor coast-down"));
+    USB_LOG.print(F("MIXER GATE: wait another "));
+    USB_LOG.print(DIRECTION_CHANGE_PAUSE_MS - stoppedForMs);
+    USB_LOG.println(F(" ms for motor coast-down"));
     return;
   }
 
@@ -550,26 +614,26 @@ void moveMolder(uint8_t angle, const __FlashStringHelper *positionName) {
   if (diagnosticActive) return;
   if (!chamberMotionReady()) return;
   if (softwareStopLatched) {
-    Serial.println(F("MOLDER COMMAND REJECTED: send R to arm first"));
+    USB_LOG.println(F("MOLDER COMMAND REJECTED: send R to arm first"));
     return;
   }
 
   if (automaticProcessIsActive()) {
-    Serial.println(F("MOLDER COMMAND REJECTED: automatic process is running"));
+    USB_LOG.println(F("MOLDER COMMAND REJECTED: automatic process is running"));
     return;
   }
 
   if (runState != STATE_IDLE) {
     stopAllMotors(false);
-    Serial.println(F("MOLDER: motor stopped; wait 2.5 s, then resend 5/6"));
+    USB_LOG.println(F("MOLDER: motor stopped; wait 2.5 s, then resend 5/6"));
     return;
   }
 
   const unsigned long stoppedForMs = millis() - lastMotorStoppedAtMs;
   if (stoppedForMs < DIRECTION_CHANGE_PAUSE_MS) {
-    Serial.print(F("MOLDER: wait another "));
-    Serial.print(DIRECTION_CHANGE_PAUSE_MS - stoppedForMs);
-    Serial.println(F(" ms for motor coast-down"));
+    USB_LOG.print(F("MOLDER: wait another "));
+    USB_LOG.print(DIRECTION_CHANGE_PAUSE_MS - stoppedForMs);
+    USB_LOG.println(F(" ms for motor coast-down"));
     return;
   }
 
@@ -577,6 +641,9 @@ void moveMolder(uint8_t angle, const __FlashStringHelper *positionName) {
 }
 
 void latchSoftwareStop() {
+  production.stop(false, millis());
+  stopPumpTest();
+  stopHeaterTest();
   if (diagnosticActive) {
     diagnosticActive = false;
     diagnosticStepRunning = false;
@@ -592,8 +659,8 @@ void latchSoftwareStop() {
   // An open door never commands a new gate position or detaches a holding servo.
   if (chamber.online && chamber.doorClosed) closeAndHoldBothGates();
   if (!writeStatusIo(statusIoShadow)) statusIoOnline = false;
-  Serial.println(F("SOFTWARE STOP LATCHED: motors stopped; Reset required"));
-  Serial.println(F("Inspect the machine, then send R to arm again."));
+  USB_LOG.println(F("SOFTWARE STOP LATCHED: motors stopped; Reset required"));
+  USB_LOG.println(F("Inspect the machine, then send R to arm again."));
   emitEvent(F("STOPPED"), F("warning"), F("controller"), F("stopped"),
             F("Software stop latched"));
 }
@@ -601,10 +668,13 @@ void latchSoftwareStop() {
 const char *lastArmRejectReason = "reset_rejected";
 
 bool armMotorTest() {
+  if (production.active() && production.kind == 'D') return false;
   lastArmRejectReason = "reset_rejected";
+  if (pumpTestActive) { lastArmRejectReason = "pump_active"; return false; }
+  if (heaterTestActive) { lastArmRejectReason = "heater_active"; return false; }
   if (diagnosticActive) {
     lastArmRejectReason = "test_running";
-    Serial.println(F("ARM REJECTED: component test running; stop it first"));
+    USB_LOG.println(F("ARM REJECTED: component test running; stop it first"));
     return false;
   }
   if (!chamberMotionReady()) {
@@ -615,59 +685,59 @@ bool armMotorTest() {
   }
   if (!controlIoOnline) {
     lastArmRejectReason = "buttons_offline";
-    Serial.println(F("ARM REJECTED: control-button expander is offline"));
+    USB_LOG.println(F("ARM REJECTED: control-button expander is offline"));
     return false;
   }
 
   if (emergencyButton.stableActive) {
     lastArmRejectReason = "emergency_open";
-    Serial.println(F("ARM REJECTED: emergency contact is open"));
+    USB_LOG.println(F("ARM REJECTED: emergency contact is open"));
     return false;
   }
 
   if (stopButton.stableActive) {
     lastArmRejectReason = "stop_open";
-    Serial.println(F("ARM REJECTED: physical Stop contact is open"));
+    USB_LOG.println(F("ARM REJECTED: physical Stop contact is open"));
     return false;
   }
 
   if (automaticProcessIsActive()) {
     lastArmRejectReason = "process_running";
-    Serial.println(F("ARM REJECTED: automatic process is already running"));
+    USB_LOG.println(F("ARM REJECTED: automatic process is already running"));
     return false;
   }
 
   if (millis() - softwareStopLatchedAtMs < SOFTWARE_STOP_REARM_DELAY_MS) {
     lastArmRejectReason = "reset_too_soon";
-    Serial.println(F("ARM REJECTED: wait 1 second after X, then send R again"));
+    USB_LOG.println(F("ARM REJECTED: wait 1 second after X, then send R again"));
     return false;
   }
 
   stopAllMotors(false);
   softwareStopLatched = false;
-  Serial.println(F("MOTOR TEST ARMED: motor and gate commands enabled"));
+  USB_LOG.println(F("MOTOR TEST ARMED: motor and gate commands enabled"));
   emitEvent(F("ARMED"), F("info"), F("controller"), F("stopped"),
             F("Controller armed"));
   return true;
 }
 
 void printStatusSelfTestStep(uint8_t step) {
-  Serial.print(F("STATUS TEST: "));
+  USB_LOG.print(F("STATUS TEST: "));
   switch (step) {
     case 0:
-      Serial.println(F("green Ready/Check light"));
+      USB_LOG.println(F("green Ready/Check light"));
       break;
     case 1:
-      Serial.println(F("yellow Preparing/Running light"));
+      USB_LOG.println(F("yellow Preparing/Running light"));
       break;
     case 2:
-      Serial.println(F("red Stop/Fault light"));
+      USB_LOG.println(F("red Stop/Fault light"));
       break;
     case 3:
-      Serial.println(F("buzzer"));
+      USB_LOG.println(F("buzzer"));
       break;
     default:
-      Serial.println(F("all three lights and buzzer"));
+      USB_LOG.println(F("all three lights and buzzer"));
       break;
   }
 }
@@ -676,70 +746,50 @@ void startStatusSelfTest() {
   if (diagnosticActive) return;
   if (!chamberMotionReady()) return;
   if (!statusIoOnline) {
-    Serial.println(F("STATUS TEST REJECTED: status-light expander is offline"));
+    USB_LOG.println(F("STATUS TEST REJECTED: status-light expander is offline"));
     return;
   }
 
   if (!controlIoOnline || stopButton.stableActive ||
       emergencyButton.stableActive) {
-    Serial.println(F("STATUS TEST REJECTED: clear Stop/Emergency faults first"));
+    USB_LOG.println(F("STATUS TEST REJECTED: clear Stop/Emergency faults first"));
     return;
   }
 
   if (automaticProcessIsActive() || runState != STATE_IDLE) {
-    Serial.println(F("STATUS TEST REJECTED: wait until all movement has stopped"));
+    USB_LOG.println(F("STATUS TEST REJECTED: wait until all movement has stopped"));
     return;
   }
 
   if (!writeStatusIo(0xFF)) {
     statusIoOnline = false;
-    Serial.println(F("STATUS TEST REJECTED: status-light expander did not respond"));
+    USB_LOG.println(F("STATUS TEST REJECTED: status-light expander did not respond"));
     return;
   }
 
   statusSelfTestActive = true;
   statusSelfTestStep = 0;
   statusSelfTestStepStartedAtMs = millis();
-  Serial.println(F("STATUS TEST STARTED: no motors will move"));
+  USB_LOG.println(F("STATUS TEST STARTED: no motors will move"));
   printStatusSelfTestStep(statusSelfTestStep);
 }
 
 void printHelp() {
-  Serial.println();
-  Serial.println(F("PaperBriq Arduino Uno actuator test ready"));
-  Serial.println(F("S = read chamber DHT22 through ESP32 GPIO27 (no movement)"));
-  Serial.println(F("R = arm/reset after a software stop"));
-  Serial.println(F("1 = shredder forward pulse"));
-  Serial.println(F("2 = shredder reverse pulse"));
-  Serial.println(F("3 = mixer forward pulse"));
-  Serial.println(F("4 = mixer reverse pulse"));
-  Serial.println(F("E = presser extend pulse"));
-  Serial.println(F("T = presser retract pulse"));
-  Serial.println(F("F = pusher forward pulse"));
-  Serial.println(F("B = pusher reverse pulse"));
-  Serial.println(F("P = run the complete shred, mix, press, and eject cycle"));
-  Serial.println(F("O = open mixer gate servo"));
-  Serial.println(F("C = close mixer gate servo"));
-  Serial.println(F("D = release mixer gate servo"));
-  Serial.println(F("5 = open molder servo"));
-  Serial.println(F("6 = close molder servo"));
-  Serial.println(F("7 = release molder servo"));
-  Serial.println(F("L = test green, yellow, red, buzzer, and all indicators"));
-  Serial.println(F("X = latch software stop and cancel movement"));
-  Serial.println(F("H = show commands"));
-  Serial.println(F("Q = sequential component tests (unloaded, supervised; R first)"));
-  Serial.println(F("I = door/fan/lock status (0x24: P2/P5/P6)"));
-  Serial.println(F("V = 10-second fan test; N = fan off"));
-  Serial.println(F("U = 1-second unlock; K = cancel unlock power"));
-  Serial.println(F("For V/U: use X, wait for movement to stop; heater disabled"));
-  Serial.println(F("No gate movement at boot; close door then R to arm"));
-  Serial.println(F("Send R first to enable motor and manual gate commands"));
+  USB_LOG.println(F("PaperBriq Uno: S=sensor R=arm X=stop H=help"));
+  USB_LOG.println(F("1/2 shred forward/reverse; 3/4 mix forward/reverse"));
+  USB_LOG.println(F("E/T press extend/retract; F/B push forward/back"));
+  USB_LOG.println(F("O/C/D mixer gate open/close/release; 5/6/7 molder"));
+  USB_LOG.println(F("P=form; Q=unloaded component test (R first); L=lights"));
+  USB_LOG.println(F("I=chamber; V/N=fan test/off; U/K=unlock/off"));
+  USB_LOG.println(F("J=heater; Y=pump; stopped/closed door required, X to cancel"));
+  if (PAPERBRIQ_STANDALONE_BENCH) USB_LOG.println(F("Heater 10s/pump 3s: thermostat, fan, water, supervision required"));
+  else USB_LOG.println(F("Heater requires fresh S reading"));
 }
 
 void requestPulse(Motion motion, unsigned long runDurationMs) {
   if (!chamberMotionReady()) return;
   if (softwareStopLatched) {
-    Serial.println(F("COMMAND REJECTED: send R to arm first"));
+    USB_LOG.println(F("COMMAND REJECTED: send R to arm first"));
     return;
   }
 
@@ -752,21 +802,21 @@ void requestPulse(Motion motion, unsigned long runDurationMs) {
   runState = STATE_WAITING;
   stateStartedAtMs = millis();
 
-  Serial.print(motionName(motion));
-  Serial.print(F(": requested at "));
-  Serial.print(dutyPercent(motionDuty(motion)));
-  Serial.println(F("% PWM; waiting for safety pause"));
+  USB_LOG.print(motionName(motion));
+  USB_LOG.print(F(": requested at "));
+  USB_LOG.print(dutyPercent(motionDuty(motion)));
+  USB_LOG.println(F("% PWM; waiting for safety pause"));
 }
 
 void requestManualPulse(Motion motion) {
   if (diagnosticActive) return;
   if (statusSelfTestActive) {
-    Serial.println(F("MANUAL COMMAND REJECTED: finish the status test first"));
+    USB_LOG.println(F("MANUAL COMMAND REJECTED: finish the status test first"));
     return;
   }
 
   if (automaticProcessIsActive()) {
-    Serial.println(F("MANUAL COMMAND REJECTED: automatic process is running"));
+    USB_LOG.println(F("MANUAL COMMAND REJECTED: automatic process is running"));
     return;
   }
 
@@ -831,10 +881,10 @@ void startRequestedMotion() {
       return;
   }
 
-  Serial.print(motionName(activeMotion));
-  Serial.print(F(": running for "));
-  Serial.print(activeRunDurationMs);
-  Serial.println(F(" ms"));
+  USB_LOG.print(motionName(activeMotion));
+  USB_LOG.print(F(": running for "));
+  USB_LOG.print(activeRunDurationMs);
+  USB_LOG.println(F(" ms"));
   if (activeMotion == MIXER_FORWARD || activeMotion == MIXER_REVERSE) {
     emitEvent(F("MIXER_STARTED"), F("info"), F("mixer"), F("running"),
               F("Mixer started"));
@@ -866,8 +916,8 @@ void serviceMotorState() {
       nowMs - stateStartedAtMs >= activeRunDurationMs) {
     const Motion completedMotion = activeMotion;
     stopAllMotors(false);
-    Serial.print(motionName(completedMotion));
-    Serial.println(F(": pulse complete; stopped"));
+    USB_LOG.print(motionName(completedMotion));
+    USB_LOG.println(F(": pulse complete; stopped"));
     if (completedMotion == MIXER_FORWARD || completedMotion == MIXER_REVERSE) {
       emitEvent(F("MIXER_COMPLETED"), F("info"), F("mixer"),
                 (automaticProcessIsActive() || diagnosticActive) ? F("running") : F("stopped"),
@@ -886,42 +936,42 @@ void serviceMotorState() {
 
 bool startAutomaticProcess() {
   if (diagnosticActive) {
-    Serial.println(F("PROCESS REJECTED: component test running; stop it first"));
+    USB_LOG.println(F("PROCESS REJECTED: component test running; stop it first"));
     return false;
   }
   if (!chamberMotionReady()) return false;
   if (statusSelfTestActive) {
-    Serial.println(F("PROCESS REJECTED: finish the status test first"));
+    USB_LOG.println(F("PROCESS REJECTED: finish the status test first"));
     return false;
   }
 
   if (!controlIoOnline) {
-    Serial.println(F("PROCESS REJECTED: control-button expander is offline"));
+    USB_LOG.println(F("PROCESS REJECTED: control-button expander is offline"));
     return false;
   }
 
   if (emergencyButton.stableActive) {
-    Serial.println(F("PROCESS REJECTED: emergency contact is open"));
+    USB_LOG.println(F("PROCESS REJECTED: emergency contact is open"));
     return false;
   }
 
   if (stopButton.stableActive) {
-    Serial.println(F("PROCESS REJECTED: physical Stop contact is open"));
+    USB_LOG.println(F("PROCESS REJECTED: physical Stop contact is open"));
     return false;
   }
 
   if (softwareStopLatched) {
-    Serial.println(F("PROCESS REJECTED: send R to arm first"));
+    USB_LOG.println(F("PROCESS REJECTED: send R to arm first"));
     return false;
   }
 
   if (automaticProcessIsActive()) {
-    Serial.println(F("PROCESS REJECTED: a process is already running"));
+    USB_LOG.println(F("PROCESS REJECTED: a process is already running"));
     return false;
   }
 
   if (runState != STATE_IDLE) {
-    Serial.println(F("PROCESS REJECTED: wait for the manual motor test to stop"));
+    USB_LOG.println(F("PROCESS REJECTED: wait for the manual motor test to stop"));
     return false;
   }
 
@@ -929,14 +979,14 @@ bool startAutomaticProcess() {
   automaticProcessState = PROCESS_WAITING_TO_CLOSE_GATE;
   processStateStartedAtMs = millis();
 
-  Serial.println();
-  Serial.println(F("AUTOMATIC PROCESS STARTED"));
-  Serial.println(F("STEP: closing mixer gate and molder"));
-  Serial.print(F("Shredder + mixer time: "));
-  Serial.print(PROCESS_SHREDDER_RUN_MS);
-  Serial.print(F(" ms | Mixer-only finish time: "));
-  Serial.print(PROCESS_MIXER_FINISH_MS);
-  Serial.println(F(" ms"));
+  USB_LOG.println();
+  USB_LOG.println(F("AUTOMATIC PROCESS STARTED"));
+  USB_LOG.println(F("STEP: closing mixer gate and molder"));
+  USB_LOG.print(F("Shredder + mixer time: "));
+  USB_LOG.print(PROCESS_SHREDDER_RUN_MS);
+  USB_LOG.print(F(" ms | Mixer-only finish time: "));
+  USB_LOG.print(PROCESS_MIXER_FINISH_MS);
+  USB_LOG.println(F(" ms"));
   emitEvent(F("PROCESS_STARTED"), F("info"), F("process"), F("running"),
             F("Process started"));
   return true;
@@ -951,7 +1001,7 @@ void serviceControlButtons() {
   if (!readControlIo(value)) {
     if (controlIoOnline) {
       controlIoOnline = false;
-      Serial.println(F("CONTROL BUTTONS LOST: latching software stop"));
+      USB_LOG.println(F("CONTROL BUTTONS LOST: latching software stop"));
       if (!softwareStopLatched || diagnosticActive || chamber.fanOn || chamber.unlockOn) latchSoftwareStop();
     }
     return;
@@ -973,36 +1023,36 @@ void serviceControlButtons() {
 
   if (emergencyButton.stableActive) {
     if (emergencyChanged) {
-      Serial.println(F("EMERGENCY STOP: contact opened"));
+      USB_LOG.println(F("EMERGENCY STOP: contact opened"));
       if (!softwareStopLatched || diagnosticActive || chamber.fanOn || chamber.unlockOn) latchSoftwareStop();
     }
     return;
   }
 
   if (emergencyChanged) {
-    Serial.println(F("EMERGENCY STOP: released; Reset is required to arm"));
+    USB_LOG.println(F("EMERGENCY STOP: released; Reset is required to arm"));
   }
 
   if (stopButton.stableActive) {
     if (stopChanged) {
-      Serial.println(F("STOP BUTTON: contact opened"));
+      USB_LOG.println(F("STOP BUTTON: contact opened"));
       if (!softwareStopLatched || diagnosticActive || chamber.fanOn || chamber.unlockOn) latchSoftwareStop();
     }
     return;
   }
 
   if (stopChanged) {
-    Serial.println(F("STOP BUTTON: released; Reset is required to arm"));
+    USB_LOG.println(F("STOP BUTTON: released; Reset is required to arm"));
   }
 
   if (resetChanged && resetButton.stableActive) {
-    Serial.println(F("RESET BUTTON: pressed"));
+    USB_LOG.println(F("RESET BUTTON: pressed"));
     armMotorTest();
     return;
   }
 
   if (startChanged && startButton.stableActive) {
-    Serial.println(F("START BUTTON: pressed"));
+    USB_LOG.println(F("START BUTTON: pressed"));
     startAutomaticProcess();
   }
 }
@@ -1025,7 +1075,7 @@ void serviceStatusLights() {
     if (unsafeToContinue) {
       statusSelfTestActive = false;
       writeStatusIo(0xFF);
-      Serial.println(F("STATUS TEST CANCELLED: machine state changed"));
+      USB_LOG.println(F("STATUS TEST CANCELLED: machine state changed"));
       return;
     }
 
@@ -1035,7 +1085,7 @@ void serviceStatusLights() {
       if (statusSelfTestStep >= STATUS_SELF_TEST_STEP_COUNT) {
         statusSelfTestActive = false;
         writeStatusIo(0xFF);
-        Serial.println(F("STATUS TEST COMPLETE: normal status display restored"));
+        USB_LOG.println(F("STATUS TEST COMPLETE: normal status display restored"));
         return;
       }
       printStatusSelfTestStep(statusSelfTestStep);
@@ -1066,7 +1116,7 @@ void serviceStatusLights() {
       statusSelfTestActive = false;
       statusIoOnline = false;
       lastStatusIoRetryAtMs = nowMs;
-      Serial.println(F("STATUS TEST FAILED: status-light expander was lost"));
+      USB_LOG.println(F("STATUS TEST FAILED: status-light expander was lost"));
     }
     return;
   }
@@ -1106,7 +1156,7 @@ void serviceStatusLights() {
   if (chamber.outputs(desired) != statusIoShadow && !writeStatusIo(desired)) {
     statusIoOnline = false;
     lastStatusIoRetryAtMs = nowMs;
-    Serial.println(F("STATUS LIGHTS LOST: outputs switched off on reconnect"));
+    USB_LOG.println(F("STATUS LIGHTS LOST: outputs switched off on reconnect"));
   }
 }
 
@@ -1145,7 +1195,7 @@ void serviceAutomaticProcess() {
         digitalWrite(MIXER_LPWM, HIGH);
         automaticProcessState = PROCESS_SHREDDING_AND_MIXING;
         processStateStartedAtMs = nowMs;
-        Serial.println(F("STEP: shredder and mixer started together"));
+        USB_LOG.println(F("STEP: shredder and mixer started together"));
         emitEvent(F("SHREDDER_MIXER_STARTED"), F("info"), F("process"),
                   F("running"), F("Shredder and mixer started"));
       }
@@ -1158,20 +1208,25 @@ void serviceAutomaticProcess() {
         digitalWrite(SHREDDER_LPWM, LOW);
         automaticProcessState = PROCESS_MIXER_FINISHING;
         processStateStartedAtMs = nowMs;
-        Serial.println(F("STEP: shredder stopped; mixer continuing alone"));
+        USB_LOG.println(F("STEP: shredder stopped; mixer continuing alone"));
         emitEvent(F("SHREDDER_COMPLETED"), F("info"), F("shredder"),
                   F("running"), F("Shredder stopped; mixer continuing"));
       }
       break;
 
     case PROCESS_MIXER_FINISHING:
+      if (production.kind == 'P' && production.phase == ProductionTimer::RUNNING) break;
+      if (production.kind == 'P' && production.phase == ProductionTimer::WAITING &&
+          nowMs - processStateStartedAtMs >= PROCESS_MIXER_FINISH_MS) {
+        production.stop(true, nowMs); latchSoftwareStop(); return;
+      }
       if (nowMs - processStateStartedAtMs >= PROCESS_MIXER_FINISH_MS) {
         digitalWrite(MIXER_RPWM, LOW);
         digitalWrite(MIXER_LPWM, LOW);
         lastMotorStoppedAtMs = nowMs;
         automaticProcessState = PROCESS_WAITING_TO_OPEN_GATE;
         processStateStartedAtMs = nowMs;
-        Serial.println(F("Mixer stopped; waiting before opening gate"));
+        USB_LOG.println(F("Mixer stopped; waiting before opening gate"));
         emitEvent(F("MIXER_COMPLETED"), F("info"), F("mixer"),
                   F("running"), F("Mixer finishing run completed"));
       }
@@ -1179,7 +1234,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_TO_OPEN_GATE:
       if (nowMs - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) {
-        Serial.println(F("STEP: opening mixer gate; molder remains closed"));
+        USB_LOG.println(F("STEP: opening mixer gate; molder remains closed"));
         setMixerGateAngle(MIXER_GATE_OPEN_ANGLE, F("OPEN"));
         automaticProcessState = PROCESS_WAITING_FOR_GATE_TO_OPEN;
         processStateStartedAtMs = nowMs;
@@ -1190,7 +1245,7 @@ void serviceAutomaticProcess() {
       if (nowMs - processStateStartedAtMs >= MIXER_GATE_TRAVEL_MS) {
         automaticProcessState = PROCESS_RELEASING_MATERIAL;
         processStateStartedAtMs = nowMs;
-        Serial.println(F("STEP: releasing material into the closed molder"));
+        USB_LOG.println(F("STEP: releasing material into the closed molder"));
         emitEvent(F("MATERIAL_RELEASE_STARTED"), F("info"), F("process"),
                   F("running"), F("Releasing material into molder"));
       }
@@ -1198,7 +1253,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_RELEASING_MATERIAL:
       if (nowMs - processStateStartedAtMs >= PROCESS_MATERIAL_RELEASE_MS) {
-        Serial.println(F("STEP: closing mixer gate before pressing"));
+        USB_LOG.println(F("STEP: closing mixer gate before pressing"));
         setMixerGateAngle(MIXER_GATE_CLOSED_ANGLE, F("CLOSED"));
         automaticProcessState = PROCESS_WAITING_FOR_MIXER_GATE_TO_CLOSE;
         processStateStartedAtMs = nowMs;
@@ -1207,7 +1262,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_FOR_MIXER_GATE_TO_CLOSE:
       if (nowMs - processStateStartedAtMs >= MIXER_GATE_TRAVEL_MS) {
-        Serial.println(F("STEP: presser extending"));
+        USB_LOG.println(F("STEP: presser extending"));
         emitEvent(F("PRESSING_STARTED"), F("info"), F("process"),
                   F("running"), F("Pressing sequence started"));
         requestPulse(PRESSER_EXTEND, PROCESS_PRESSER_EXTEND_MS);
@@ -1217,7 +1272,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_PRESSER_EXTENDING:
       if (runState == STATE_IDLE) {
-        Serial.println(F("STEP: presser extension complete; retracting"));
+        USB_LOG.println(F("STEP: presser extension complete; retracting"));
         requestPulse(PRESSER_RETRACT, PROCESS_PRESSER_RETRACT_MS);
         automaticProcessState = PROCESS_PRESSER_RETRACTING;
       }
@@ -1225,7 +1280,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_PRESSER_RETRACTING:
       if (runState == STATE_IDLE) {
-        Serial.println(F("Presser retracted; waiting before opening molder"));
+        USB_LOG.println(F("Presser retracted; waiting before opening molder"));
         automaticProcessState = PROCESS_WAITING_TO_OPEN_MOLDER;
         processStateStartedAtMs = nowMs;
       }
@@ -1233,7 +1288,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_TO_OPEN_MOLDER:
       if (nowMs - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) {
-        Serial.println(F("STEP: opening molder gate for ejection"));
+        USB_LOG.println(F("STEP: opening molder gate for ejection"));
         emitEvent(F("EJECTION_STARTED"), F("info"), F("process"),
                   F("running"), F("Opening molder for ejection"));
         setMolderAngle(MOLDER_OPEN_ANGLE, F("OPEN"));
@@ -1244,7 +1299,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_FOR_MOLDER_TO_OPEN:
       if (nowMs - processStateStartedAtMs >= MOLDER_TRAVEL_MS) {
-        Serial.println(F("STEP: molder open; pusher extending"));
+        USB_LOG.println(F("STEP: molder open; pusher extending"));
         requestPulse(PUSHER_FORWARD, PROCESS_PUSHER_EXTEND_MS);
         automaticProcessState = PROCESS_PUSHER_EXTENDING;
       }
@@ -1252,7 +1307,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_PUSHER_EXTENDING:
       if (runState == STATE_IDLE) {
-        Serial.println(F("STEP: pusher extension complete; retracting"));
+        USB_LOG.println(F("STEP: pusher extension complete; retracting"));
         requestPulse(PUSHER_REVERSE, PROCESS_PUSHER_RETRACT_MS);
         automaticProcessState = PROCESS_PUSHER_RETRACTING;
       }
@@ -1260,7 +1315,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_PUSHER_RETRACTING:
       if (runState == STATE_IDLE) {
-        Serial.println(F("Pusher retracted; waiting before closing molder"));
+        USB_LOG.println(F("Pusher retracted; waiting before closing molder"));
         automaticProcessState = PROCESS_WAITING_TO_CLOSE_MOLDER;
         processStateStartedAtMs = nowMs;
       }
@@ -1268,7 +1323,7 @@ void serviceAutomaticProcess() {
 
     case PROCESS_WAITING_TO_CLOSE_MOLDER:
       if (nowMs - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) {
-        Serial.println(F("STEP: closing molder gate"));
+        USB_LOG.println(F("STEP: closing molder gate"));
         emitEvent(F("GATES_CLOSING"), F("info"), F("process"),
                   F("running"), F("Closing gates after ejection"));
         setMolderAngle(MOLDER_CLOSED_ANGLE, F("CLOSED"));
@@ -1281,7 +1336,7 @@ void serviceAutomaticProcess() {
       if (nowMs - processStateStartedAtMs >= MOLDER_TRAVEL_MS) {
         automaticProcessState = PROCESS_IDLE;
         processCompletedAtMs = nowMs;
-        Serial.println(F("PROCESS COMPLETE: mixer and molder gates closed"));
+        USB_LOG.println(F("PROCESS COMPLETE: mixer and molder gates closed"));
         emitEvent(F("PROCESS_COMPLETED"), F("info"), F("process"),
                   F("stopped"), F("Forming sequence finished; drying not enabled"));
       }
@@ -1324,45 +1379,48 @@ void serviceChamber(bool force) {
     if (!softwareStopLatched || diagnosticActive) latchSoftwareStop();
   }
   if (statusIoOnline && wasFanOn && !chamber.fanOn)
-    Serial.println(F("FAN: OFF command sent"));
+    USB_LOG.println(F("FAN: OFF command sent"));
   if (statusIoOnline && wasUnlockOn && !chamber.unlockOn)
-    Serial.println(F("UNLOCK: OFF command sent; pulse ended"));
+    USB_LOG.println(F("UNLOCK: OFF command sent; pulse ended"));
 }
 
 bool chamberMotionReady() {
+  if (production.active() && production.kind == 'D') return false;
+  if (heaterTestActive || pumpTestActive) return false;
   serviceChamber(true);
   if (chamber.ready()) return true;
   if (!chamber.online) {
-    Serial.println(F("ACTION BLOCKED: door/status board 0x24 not responding"));
+    USB_LOG.println(F("ACTION BLOCKED: door/status board 0x24 not responding"));
   } else if (!chamber.doorClosed) {
-    Serial.println(F("ACTION BLOCKED: door interlock P2 is OPEN; close door, send I, then Reset"));
+    USB_LOG.println(F("ACTION BLOCKED: door interlock P2 is OPEN; close door, send I, then Reset"));
   } else if (chamber.unlockOn) {
-    Serial.println(F("ACTION BLOCKED: unlock pulse active; wait, then Reset"));
+    USB_LOG.println(F("ACTION BLOCKED: unlock pulse active; wait, then Reset"));
   } else if (chamber.fanOn) {
-    Serial.println(F("ACTION BLOCKED: fan test active; send N to end test, then Reset"));
+    USB_LOG.println(F("ACTION BLOCKED: fan test active; send N to end test, then Reset"));
   }
   return false;
 }
 
 void printChamberStatus() {
-  Serial.print(F("CHAMBER 0x24: door P2="));
-  Serial.print(!chamber.online ? F("UNKNOWN") : chamber.doorClosed ? F("CLOSED") : F("OPEN"));
-  Serial.print(F("; raw P2="));
-  Serial.print(!chamber.online ? F("UNKNOWN") :
+  USB_LOG.print(F("CHAMBER 0x24: door P2="));
+  USB_LOG.print(!chamber.online ? F("UNKNOWN") : chamber.doorClosed ? F("CLOSED") : F("OPEN"));
+  USB_LOG.print(F("; raw P2="));
+  USB_LOG.print(!chamber.online ? F("UNKNOWN") :
       (lastStatusInputs & ChamberControl::DOOR) ? F("HIGH") : F("LOW"));
-  Serial.print(F("; fan P5=")); Serial.print(chamber.fanOn ? F("ON (command)") : F("OFF (command)"));
-  Serial.print(F("; unlock P6=")); Serial.println(chamber.unlockOn ? F("ON (pulse)") : F("OFF"));
+  USB_LOG.print(F("; fan P5=")); USB_LOG.print(chamber.fanOn ? F("ON (command)") : F("OFF (command)"));
+  USB_LOG.print(F("; unlock P6=")); USB_LOG.println(chamber.unlockOn ? F("ON (pulse)") : F("OFF"));
   if (chamber.online) {
-    Serial.print(F("0x24 raw pins P0..P7: "));
+    USB_LOG.print(F("0x24 raw pins P0..P7: "));
     for (uint8_t pin = 0; pin < 8; ++pin) {
-      Serial.print((lastStatusInputs & (1U << pin)) ? '1' : '0');
-      if (pin < 7) Serial.print(' ');
+      USB_LOG.print((lastStatusInputs & (1U << pin)) ? '1' : '0');
+      if (pin < 7) USB_LOG.print(' ');
     }
-    Serial.println();
+    USB_LOG.println();
   }
 }
 
 bool runChamberCommand(const char *action) {
+  if (heaterTestActive || pumpTestActive) return false;
   if (diagnosticActive) return false;
   serviceChamber(true);
   const unsigned long nowMs = millis();
@@ -1378,7 +1436,7 @@ bool runChamberCommand(const char *action) {
   } else if (strcmp(action, "UNLOCK") == 0) {
     accepted = controlIoOnline && chamber.unlock(nowMs, settled);
   }
-  if (!accepted) { Serial.println(F("CHAMBER REJECTED: stop, wait, and check door/board")); return false; }
+  if (!accepted) { USB_LOG.println(F("CHAMBER REJECTED: stop, wait, and check door/board")); return false; }
   if (!statusIoOnline || !writeStatusIo(statusIoShadow)) {
     chamber.sample(false, false, nowMs); statusIoOnline = false; return false;
   }
@@ -1401,6 +1459,7 @@ const __FlashStringHelper *diagnosticItem(uint8_t step) {
 }
 
 bool startComponentTest() {
+  if (production.active()) return false;
   if (!chamberMotionReady() || diagnosticActive || softwareStopLatched ||
       automaticProcessIsActive() || runState != STATE_IDLE || statusSelfTestActive ||
       !controlIoOnline || stopButton.stableActive || emergencyButton.stableActive) return false;
@@ -1510,6 +1569,18 @@ void failRemoteCommand(const char *id, const char *message) {
 }
 
 void reportMachineHealth(const char *id) {
+  serviceProduction();
+  espLink.print(F("PROD|")); espLink.print(id);
+  espLink.print('|'); espLink.print(PAPERBRIQ_PRODUCTION_PUMP_MAX_SECONDS);
+  espLink.print('|'); espLink.print(PAPERBRIQ_PRODUCTION_DRYING_MAX_SECONDS);
+  espLink.print('|'); espLink.print(PAPERBRIQ_PUMP_VERIFIED ? 1 : 0);
+  espLink.print('|'); espLink.print(PAPERBRIQ_HEATER_VERIFIED ? 1 : 0);
+  espLink.print('|'); espLink.print(production.kind == 'P' ? 1 : production.kind == 'D' ? 2 : 0);
+  espLink.print('|'); espLink.print((uint8_t)production.phase);
+  espLink.print('|'); espLink.print(production.run);
+  espLink.print('|'); espLink.print(production.total);
+  espLink.print('|'); espLink.print(production.elapsed(millis()));
+  espLink.print('|'); espLink.println(production.remaining(millis()));
   // Read inputs and probe the indicator board without writing any outputs.
   uint8_t inputs = 0xFF;
   const bool controls = readControlIo(inputs);
@@ -1525,14 +1596,20 @@ void reportMachineHealth(const char *id) {
   espLink.print('|'); espLink.print(chamber.online && chamber.doorClosed ? 1 : 0);
   espLink.print('|'); espLink.print(chamber.fanOn ? 1 : 0);
   espLink.print('|'); espLink.print(chamber.unlockOn ? 1 : 0);
-  espLink.print('|'); espLink.println(diagnosticActive ? 1 : 0);
+  espLink.print('|'); espLink.print(diagnosticActive ? 1 : 0);
+  espLink.print('|'); espLink.print(PAPERBRIQ_STANDALONE_BENCH ? 1 : 0);
+  espLink.print('|'); espLink.print(heaterTestActive ? 1 : 0);
+  espLink.print('|'); espLink.print(pumpTestActive ? 1 : 0);
+  const bool idle = benchConditionsReady() && !heaterTestActive && !pumpTestActive;
+  espLink.print('|'); espLink.print(idle && (!heaterBenchUsed || millis() - heaterTestAt >= 60000UL) ? 1 : 0);
+  espLink.print('|'); espLink.println(idle && (!pumpHasRun || millis() - pumpTestAt >= 10000UL) ? 1 : 0);
 }
 
 void handleRemoteCommandFrame(char *line) {
   // Mirror the received frame before strtok modifies it, so USB logs can
   // distinguish a missing incoming command from a missing outgoing reply.
-  Serial.print(F("ESP32 -> Uno: "));
-  Serial.println(line);
+  USB_LOG.print(F("ESP32 -> Uno: "));
+  USB_LOG.println(line);
   char *prefix = strtok(line, "|");
   char *id = strtok(nullptr, "|");
   char *action = strtok(nullptr, "|");
@@ -1559,6 +1636,38 @@ void handleRemoteCommandFrame(char *line) {
   }
 
   emitAck(id, "DELIVERED", "received");
+
+  char output; bool edit; uint32_t run, productionSeconds;
+  if (parseProductionCommand(action, output, edit, run, productionSeconds)) {
+    serviceChamber(true); serviceControlButtons(); serviceProduction();
+    const uint32_t maximum = output == 'P' ? PAPERBRIQ_PRODUCTION_PUMP_MAX_SECONDS : PAPERBRIQ_PRODUCTION_DRYING_MAX_SECONDS;
+    const bool verified = output == 'P' ? PAPERBRIQ_PUMP_VERIFIED : PAPERBRIQ_HEATER_VERIFIED;
+    bool accepted = false;
+    if (edit) accepted = verified && production.adjust(output, run, productionSeconds, maximum, millis());
+    else {
+      accepted = production.start(output, run, productionSeconds, maximum, verified,
+          benchConditionsReady() && !pumpTestActive && !heaterTestActive &&
+          millis() - lastMotorStoppedAtMs >= 2500UL && millis() - lastGateCommandAtMs >= 2500UL, millis());
+      if (accepted) paperClearSeen = false;
+    }
+    serviceProduction();
+    if (accepted) { emitAck(id, "COMPLETED", "production_applied"); rememberRemoteResult(id, "COMPLETED", "production_applied"); }
+    else failRemoteCommand(id, "production_blocked");
+    return;
+  }
+
+  const uint8_t seconds = timedCommandSeconds(action);
+  if (seconds && PAPERBRIQ_STANDALONE_BENCH) {
+    if (heaterTestActive || pumpTestActive) { failRemoteCommand(id, "output_busy"); return; }
+    const bool heater = action[0] == 'H';
+    if (heater) { heaterDurationMs = seconds * 1000UL; startHeaterTest(); }
+    else { pumpDurationMs = seconds * 1000UL; startPumpTest(); }
+    if (heater ? heaterTestActive : pumpTestActive) {
+      emitAck(id, "COMPLETED", "timed_run_started");
+      rememberRemoteResult(id, "COMPLETED", "timed_run_started");
+    } else failRemoteCommand(id, "timed_run_blocked");
+    return;
+  }
 
   if (strcmp(action, "SELF_TEST") == 0) {
     if (startComponentTest()) {
@@ -1611,23 +1720,24 @@ void bridgeProtocolFault(const __FlashStringHelper *message) {
   latchSoftwareStop();
   // Keep the stop behavior, but show what was received before discarding it.
   // Printable text only so corrupted control bytes cannot garble the monitor.
-  Serial.print(F("UART RX partial (")); Serial.print(static_cast<unsigned int>(partialLength));
-  Serial.print(F(" bytes): ["));
+  USB_LOG.print(F("UART RX partial (")); USB_LOG.print(static_cast<unsigned int>(partialLength));
+  USB_LOG.print(F(" bytes): ["));
   for (uint8_t i = 0; i < partialLength; ++i) {
     const uint8_t c = static_cast<uint8_t>(bridgeLine[i]);
-    Serial.print(c >= 32 && c <= 126 ? static_cast<char>(c) : '?');
+    USB_LOG.print(c >= 32 && c <= 126 ? static_cast<char>(c) : '?');
   }
-  Serial.println(F("]"));
+  USB_LOG.println(F("]"));
   emitEvent(F("FAULT"), F("error"), F("controller"), F("fault"), message);
 }
 
 void requestDhtCheck() {
-  if (dhtCheckPending) { Serial.println(F("DHT22: waiting for ESP32 reply")); return; }
+  if (dhtCheckPending) { USB_LOG.println(F("DHT22: waiting for ESP32 reply")); return; }
+  heaterReadingValid = false;
   dhtCheckPending = true;
   dhtCheckSentAt = millis();
   ++dhtCheckSequence;
   espLink.print(F("DHT_CHECK|")); espLink.println(dhtCheckSequence);
-  Serial.println(F("Reading chamber DHT22 on ESP32 GPIO27..."));
+  USB_LOG.println(F("Reading chamber DHT22 on ESP32 GPIO27..."));
 }
 
 void handleDhtReply(char *line) {
@@ -1643,8 +1753,9 @@ void handleDhtReply(char *line) {
   const unsigned long sequence = strtoul(id, &end, 10);
   if (*end || sequence != dhtCheckSequence) return;
   if (strcmp(status, "ERROR") == 0 && !temperature) {
+    heaterReadingValid = false;
     dhtCheckPending = false;
-    Serial.println(F("DHT22: no fresh valid reading. Check ESP32 sensor wiring; try S again."));
+    USB_LOG.println(F("DHT22: no fresh valid reading. Check ESP32 sensor wiring; try S again."));
     return;
   }
   if (strcmp(status, "OK") != 0 || !temperature || !humidity || extra) return;
@@ -1652,9 +1763,12 @@ void handleDhtReply(char *line) {
   if (*end || !isfinite(t) || t < -40 || t > 80) return;
   const double h = strtod(humidity, &end);
   if (*end || !isfinite(h) || h < 0 || h > 100) return;
+  heaterTemperature = t;
+  heaterReadingAt = millis();
+  heaterReadingValid = true;
   dhtCheckPending = false;
-  Serial.print(F("Chamber DHT22: ")); Serial.print(temperature);
-  Serial.print(F(" C, ")); Serial.print(humidity); Serial.println(F(" %RH (ESP32 reading)"));
+  USB_LOG.print(F("Chamber DHT22: ")); USB_LOG.print(temperature);
+  USB_LOG.print(F(" C, ")); USB_LOG.print(humidity); USB_LOG.println(F(" %RH (ESP32 reading)"));
 }
 
 void serviceBridgeCommands() {
@@ -1663,7 +1777,9 @@ void serviceBridgeCommands() {
     bridgeLastByteAtMs = millis();
     if (c == '\n') {
       bridgeLine[bridgeLineLength] = '\0';
-      if (strncmp(bridgeLine, "DHT|", 4) == 0) handleDhtReply(bridgeLine);
+      if (bridgeLineLength == 4 && strncmp(bridgeLine, "IR|", 3) == 0 &&
+          (bridgeLine[3] == '0' || bridgeLine[3] == '1')) handlePaperSignal(bridgeLine[3]);
+      else if (strncmp(bridgeLine, "DHT|", 4) == 0) handleDhtReply(bridgeLine);
       else if (bridgeLineLength > 0) handleRemoteCommandFrame(bridgeLine);
       bridgeLineLength = 0;
     } else if (c != '\r') {
@@ -1682,8 +1798,128 @@ void serviceBridgeCommands() {
   }
   if (dhtCheckPending && millis() - dhtCheckSentAt >= 10000UL) {
     dhtCheckPending = false;
-    Serial.println(F("DHT22: ESP32 reply timed out. Update ESP32 firmware and check UART link."));
+    USB_LOG.println(F("DHT22: ESP32 reply timed out. Update ESP32 firmware and check UART link."));
   }
+}
+
+bool benchConditionsReady() {
+  return softwareStopLatched && !diagnosticActive && !statusSelfTestActive &&
+      runState == STATE_IDLE && !automaticProcessIsActive() &&
+      statusIoOnline && chamber.ready() && controlIoOnline &&
+      !stopButton.rawActive && !stopButton.stableActive &&
+      !emergencyButton.rawActive && !emergencyButton.stableActive;
+}
+
+void serviceProduction() {
+  if (!production.active()) {
+    if (productionPumpWasOn && production.phase == ProductionTimer::FINISHED &&
+        automaticProcessState == PROCESS_MIXER_FINISHING) processStateStartedAtMs = millis();
+    productionPumpWasOn = false;
+    if (production.run) {
+      if (!pumpTestActive) digitalWrite(PUMP_ENABLE_PIN, LOW);
+      if (!heaterTestActive) digitalWrite(HEATER_ENABLE_PIN, LOW);
+    }
+    return;
+  }
+  const bool safe = chamber.ready() && statusIoOnline && controlIoOnline &&
+      !stopButton.rawActive && !stopButton.stableActive &&
+      !emergencyButton.rawActive && !emergencyButton.stableActive &&
+      !diagnosticActive && !statusSelfTestActive && !pumpTestActive && !heaterTestActive;
+  const bool mixing = automaticProcessState == PROCESS_SHREDDING_AND_MIXING ||
+      automaticProcessState == PROCESS_MIXER_FINISHING;
+  production.tick(safe && (production.kind == 'P' ?
+      (!production.on() || (mixing && !softwareStopLatched)) :
+      (softwareStopLatched && !automaticProcessIsActive() && runState == STATE_IDLE)), millis());
+  if (productionPumpWasOn && production.phase == ProductionTimer::FINISHED &&
+      automaticProcessState == PROCESS_MIXER_FINISHING) processStateStartedAtMs = millis();
+  productionPumpWasOn = production.kind == 'P' && production.on();
+  digitalWrite(PUMP_ENABLE_PIN, production.kind == 'P' && production.on() ? HIGH : LOW);
+  digitalWrite(HEATER_ENABLE_PIN, production.kind == 'D' && production.on() ? HIGH : LOW);
+}
+
+void handlePaperSignal(char value) {
+  const unsigned long now = millis();
+  const bool edge = value == '1' && paperClearSeen && now - paperSignalAt < 1500UL;
+  paperClearSeen = value == '0'; paperSignalAt = now;
+  production.detectPaper(edge, automaticProcessState == PROCESS_SHREDDING_AND_MIXING ||
+      automaticProcessState == PROCESS_MIXER_FINISHING, now);
+  serviceProduction();
+}
+
+bool heaterConditionsReady() {
+  return !pumpTestActive && benchConditionsReady() &&
+      (PAPERBRIQ_STANDALONE_BENCH ?
+        (!heaterReadingValid || heaterTemperature < 40.0f) :
+        (heaterReadingValid && millis() - heaterReadingAt < 5000UL && heaterTemperature < 40.0f));
+}
+
+void stopPumpTest() {
+  digitalWrite(PUMP_ENABLE_PIN, LOW);
+  if (pumpTestActive) USB_LOG.println(F("PUMP: D3 OFF"));
+  pumpTestActive = false;
+}
+
+void servicePumpTest() {
+  if (pumpTestActive && (millis() - pumpTestAt >= pumpDurationMs ||
+      heaterTestActive || !benchConditionsReady())) stopPumpTest();
+}
+
+void startPumpTest() {
+  if (production.active()) return;
+  if (!PAPERBRIQ_PUMP_VERIFIED && !PAPERBRIQ_STANDALONE_BENCH) {
+    USB_LOG.println(F("PUMP BLOCKED: wiring/suppression verification pending")); return;
+  }
+  if (pumpTestActive) return;
+  serviceChamber(true);
+  serviceControlButtons();
+  if (heaterTestActive || !benchConditionsReady() ||
+      millis() - lastMotorStoppedAtMs < 2500UL ||
+      millis() - lastGateCommandAtMs < 2500UL ||
+      (pumpHasRun && millis() - pumpTestAt < 10000UL)) {
+    USB_LOG.println(F("PUMP BLOCKED: stop, close door, check contacts; wait 10s between starts")); return;
+  }
+  pumpTestAt = millis(); pumpHasRun = true; pumpTestActive = true;
+  digitalWrite(PUMP_ENABLE_PIN, HIGH);
+  USB_LOG.print(F("PUMP: D3 ON, milliseconds=")); USB_LOG.println(pumpDurationMs);
+}
+
+void stopHeaterTest() {
+  digitalWrite(HEATER_ENABLE_PIN, LOW);
+  if (heaterTestActive) {
+    heaterReadingValid = false;
+    USB_LOG.println(F("HEATER: D4 OFF"));
+  }
+  heaterTestActive = false;
+}
+
+void serviceHeaterTest() {
+  if (heaterTestActive && (millis() - heaterTestAt >= heaterDurationMs || !heaterConditionsReady())) {
+    stopHeaterTest();
+    // Consume the reading: another test requires another successful S reply.
+    heaterReadingValid = false;
+  }
+}
+
+void startHeaterTest() {
+  if (production.active()) return;
+  if (!PAPERBRIQ_HEATER_VERIFIED && !PAPERBRIQ_STANDALONE_BENCH) {
+    USB_LOG.println(F("HEATER BLOCKED: wiring/cutoff verification pending")); return;
+  }
+  if (heaterTestActive) return; // Repeated J never extends the pulse.
+  if (PAPERBRIQ_STANDALONE_BENCH && heaterBenchUsed && millis() - heaterTestAt < 60000UL) {
+    USB_LOG.println(F("HEATER: wait 60s between bench starts")); return;
+  }
+  serviceChamber(true);
+  serviceControlButtons();
+  if (!heaterConditionsReady() || millis() - lastMotorStoppedAtMs < 2500UL ||
+      millis() - lastGateCommandAtMs < 2500UL) {
+    USB_LOG.println(F("HEATER BLOCKED: stop/door/contacts/temperature")); return;
+  }
+  heaterTestAt = millis();
+  heaterBenchUsed = true;
+  heaterTestActive = true;
+  digitalWrite(HEATER_ENABLE_PIN, HIGH);
+  USB_LOG.print(F("HEATER: D4 ON, milliseconds=")); USB_LOG.println(heaterDurationMs);
 }
 
 void serviceSerialCommands() {
@@ -1691,9 +1927,11 @@ void serviceSerialCommands() {
     const char command = Serial.read();
 
     switch (command) {
+      case 'j': case 'J': if (!heaterTestActive) { heaterDurationMs = HEATER_TEST_PULSE_MS; startHeaterTest(); } break;
+      case 'y': case 'Y': if (!pumpTestActive) { pumpDurationMs = 3000; startPumpTest(); } break;
       case 's': case 'S': requestDhtCheck(); break;
       case 'q': case 'Q':
-        if (!startComponentTest()) Serial.println(F("TEST REJECTED: close door, Reset, and stop other actions"));
+        if (!startComponentTest()) USB_LOG.println(F("TEST REJECTED: close door, Reset, and stop other actions"));
         break;
       case 'i': case 'I':
         serviceChamber(true); printChamberStatus(); break;
@@ -1741,11 +1979,11 @@ void serviceSerialCommands() {
         break;
       case '7':
         if (automaticProcessIsActive() || diagnosticActive) {
-          Serial.println(F("MOLDER RELEASE REJECTED: process is running"));
+          USB_LOG.println(F("MOLDER RELEASE REJECTED: process is running"));
         } else if (runState == STATE_IDLE) {
           releaseMolderServo(true);
         } else {
-          Serial.println(F("MOLDER RELEASE REJECTED: stop the motor first"));
+          USB_LOG.println(F("MOLDER RELEASE REJECTED: stop the motor first"));
         }
         break;
       case 'p':
@@ -1763,11 +2001,11 @@ void serviceSerialCommands() {
       case 'd':
       case 'D':
         if (automaticProcessIsActive() || diagnosticActive) {
-          Serial.println(F("SERVO RELEASE REJECTED: process is running"));
+          USB_LOG.println(F("SERVO RELEASE REJECTED: process is running"));
         } else if (runState == STATE_IDLE) {
           releaseMixerGateServo(true);
         } else {
-          Serial.println(F("SERVO RELEASE REJECTED: stop the motor first"));
+          USB_LOG.println(F("SERVO RELEASE REJECTED: stop the motor first"));
         }
         break;
       case 'x':
@@ -1794,9 +2032,9 @@ void serviceSerialCommands() {
         // Ignore Serial Monitor line endings and whitespace.
         break;
       default:
-        Serial.print(F("Unknown command: "));
-        Serial.println(command);
-        Serial.println(F("Send H to show the command list."));
+        USB_LOG.print(F("Unknown command: "));
+        USB_LOG.println(command);
+        USB_LOG.println(F("Send H to show the command list."));
         break;
     }
   }
@@ -1804,6 +2042,10 @@ void serviceSerialCommands() {
 
 void setup() {
   // Load LOW before switching each output to OUTPUT to reduce startup glitches.
+  digitalWrite(HEATER_ENABLE_PIN, LOW);
+  pinMode(HEATER_ENABLE_PIN, OUTPUT);
+  digitalWrite(PUMP_ENABLE_PIN, LOW);
+  pinMode(PUMP_ENABLE_PIN, OUTPUT);
   digitalWrite(SHREDDER_RPWM, LOW);
   digitalWrite(SHREDDER_LPWM, LOW);
   digitalWrite(MIXER_RPWM, LOW);
@@ -1831,7 +2073,7 @@ void setup() {
 
   Serial.begin(9600);
   espLink.begin(ESP_LINK_BAUD);
-  Serial.println(F("Uno link diagnostic: RX=A2, TX=A3, baud=9600"));
+  USB_LOG.println(F("Uno link diagnostic: RX=A2, TX=A3, baud=9600"));
   Wire.begin();
   Wire.setWireTimeout(25000, true);
   delay(500);
@@ -1844,16 +2086,24 @@ void setup() {
 }
 
 void loop() {
+  serviceProduction();
+  servicePumpTest();
+  serviceHeaterTest();
   serviceChamber();
   serviceControlButtons();
+  servicePumpTest();
+  serviceHeaterTest();
   serviceStatusLights();
   serviceBridgeCommands();
   serviceMotorState();
   serviceComponentTest();
   serviceAutomaticProcess();
   serviceSerialCommands();
+  serviceProduction();
   serviceChamber();
   serviceControlButtons();
+  servicePumpTest();
+  serviceHeaterTest();
   serviceStatusLights();
   serviceBridgeCommands();
   serviceMotorState();

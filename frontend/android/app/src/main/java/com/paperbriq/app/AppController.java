@@ -516,12 +516,64 @@ public class AppController {
     }
 
     public void sendDeviceCommand(String command) {
+        sendDeviceCommand(command, 0);
+    }
+
+    public int productionSeconds(String action) {
+        JSONObject controls = session.pagePayload("deviceControl").optJSONObject("productionControls");
+        JSONObject settings = controls == null ? null : controls.optJSONObject("settings");
+        return settings == null ? 0 : settings.optInt(action + "Seconds", 0);
+    }
+
+    public void saveProductionSeconds(String action, int seconds) {
+        if (!canControlMachine() || !("pump".equals(action) || "drying".equals(action))
+                || seconds < 0 || seconds > Integer.MAX_VALUE / 1000) return;
+        if (!hasControlKey()) { showControlKeyDialog(() -> saveProductionSeconds(action, seconds)); return; }
+        executor.execute(() -> {
+            try {
+                JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                JSONObject controls = latest.optJSONObject("productionControls");
+                JSONObject previous = controls == null ? null : controls.optJSONObject("settings");
+                if (previous == null) throw new IllegalStateException("Update the server before saving process settings.");
+                JSONObject body = new JSONObject();
+                body.put("deviceId", DEVICE_ID);
+                for (String key : new String[]{"pump", "drying"}) {
+                    int n = key.equals(action) ? seconds : previous.optInt(key + "Seconds", 0);
+                    body.put(key + "Seconds", n > 0 ? n : JSONObject.NULL);
+                }
+                Map<String,String> headers = new HashMap<>(); headers.put("X-Control-Key", controlKey);
+                apiClient.postJson("/api/device/production-settings", body, headers);
+                activity.runOnUiThread(() -> {
+                    Toast.makeText(activity, "Process time saved. Use the action button to apply it to the machine.", Toast.LENGTH_LONG).show();
+                    loadPagePayload("process", true);
+                });
+            } catch (Exception error) {
+                activity.runOnUiThread(() -> Toast.makeText(activity, error.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    public void sendProductionCommand(String action, int seconds, String runId) {
+        sendDeviceCommand(action, seconds, runId);
+    }
+
+    private void sendDeviceCommand(String command, int durationSeconds) {
+        sendDeviceCommand(command, durationSeconds, "");
+    }
+
+    private void sendDeviceCommand(String command, int durationSeconds, String runId) {
         String normalized = String.valueOf(command).trim().toLowerCase(Locale.ROOT);
+        boolean production = "pump_arm".equals(normalized) || "drying_start".equals(normalized)
+            || "pump_time".equals(normalized) || "drying_time".equals(normalized);
+        boolean timed = "heater".equals(normalized) || "pump".equals(normalized);
+        if (timed && (durationSeconds < 1 || durationSeconds > ("heater".equals(normalized) ? 10 : 3))) {
+            Toast.makeText(activity, "Choose heater 1–10 seconds or pump 1–3 seconds.", Toast.LENGTH_LONG).show(); return;
+        }
         if (!canControlMachine()) {
             Toast.makeText(activity, "Only administrators and barangay staff can control the machine.", Toast.LENGTH_LONG).show();
             return;
         }
-        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized) || "self_test".equals(normalized))) {
+        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized) || "self_test".equals(normalized) || timed || production)) {
             Toast.makeText(activity, "Unsupported machine command.", Toast.LENGTH_LONG).show();
             return;
         }
@@ -530,7 +582,7 @@ public class AppController {
             return;
         }
         if (!hasControlKey()) {
-            showControlKeyDialog(() -> sendDeviceCommand(normalized));
+            showControlKeyDialog(() -> sendDeviceCommand(normalized, durationSeconds, runId));
             return;
         }
         if (commandSubmitting) {
@@ -541,6 +593,15 @@ public class AppController {
         commandSubmitting = true;
         executor.execute(() -> {
             try {
+                if (timed) {
+                    JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                    JSONObject controls = latest.optJSONObject("timedControls");
+                    JSONObject output = controls == null ? null : controls.optJSONObject(normalized);
+                    if (!latest.optBoolean("enabled", false) || output == null || !output.optBoolean("available", false)) {
+                        throw new IllegalStateException(output == null ? "Update and reconnect PaperBriq before starting."
+                            : output.optString("reason", "Machine controls unavailable."));
+                    }
+                }
                 if ("start".equals(normalized) || "self_test".equals(normalized)) {
                     JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
                     JSONObject checks = latest.optJSONObject("machineChecks");
@@ -557,6 +618,8 @@ public class AppController {
                 JSONObject payload = new JSONObject();
                 payload.put("deviceId", DEVICE_ID);
                 payload.put("command", normalized);
+                if (production) { payload.put("durationSeconds", durationSeconds); payload.put("runId", runId); }
+                if (timed) { payload.put("durationSeconds", durationSeconds); payload.put("supervised", true); }
                 if ("self_test".equals(normalized)) payload.put("unloadedSupervised", true);
                 payload.put("source", "android");
                 if (session.user != null) {
@@ -564,13 +627,16 @@ public class AppController {
                 }
                 Map<String, String> headers = new HashMap<>();
                 headers.put("X-Control-Key", controlKey);
+                headers.put("Idempotency-Key", java.util.UUID.randomUUID().toString());
                 JSONObject response = apiClient.postJson("/api/device/commands", payload, headers);
                 JSONObject queued = response.optJSONObject("command");
                 String status = queued != null ? queued.optString("status", "pending") : "pending";
                 activity.runOnUiThread(() -> {
                     commandSubmitting = false;
                     clearMachineCheck();
-                    String label = "stop".equals(normalized) ? "Software Stop" : "self_test".equals(normalized) ? "Component tests" : capitalize(normalized);
+                    String label = "stop".equals(normalized) ? "Software Stop" : "self_test".equals(normalized) ? "Component tests"
+                        : "pump_arm".equals(normalized) ? "Pump cycle" : "drying_start".equals(normalized) ? "Drying"
+                        : normalized.endsWith("_time") ? "Time change" : capitalize(normalized);
                     Toast.makeText(activity, label + " queued (" + status + "). Waiting for the device acknowledgement.", Toast.LENGTH_LONG).show();
                     loadPagePayload("process", true);
                 });

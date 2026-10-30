@@ -20,8 +20,8 @@ Install these Arduino libraries:
 ## Automatic startup
 
 The chamber DHT22 remains on GPIO27 and publishes temperature/humidity to the
-app. TFT use is disabled by default while disconnected; define
-`PAPERBRIQ_TFT_ENABLED 1` in `secrets.h` to restore it. USB Serial Monitor at
+app. TFT use is enabled by default again; define
+`PAPERBRIQ_TFT_ENABLED 0` in `secrets.h` to disable it when disconnected. USB Serial Monitor at
 115200 baud prints readings/errors. The updated Uno's **S** command requests a
 recent sample over UART. See [DHT chamber check](../DHT_CHAMBER_CHECK.md).
 
@@ -35,6 +35,11 @@ The startup banner is `PaperBriq monitor starting - automatic Wi-Fi and app conn
 The display keeps the 1 MHz SPI drawing speed and rotation `3` used during TFT
 troubleshooting. Automatic network startup does not start the Uno's motors;
 the existing Reset/Start command flow still applies.
+
+TFT signal wiring: CS → GPIO33, DC/A0 → GPIO21, RESET/RES → GPIO22,
+SCK/SCL → GPIO18, and MOSI/SDA → GPIO23, with a shared ESP32 GND.
+SDA/SCL on this SPI display are not the Uno's I2C connections. Check the actual
+module's power and backlight markings before connecting VCC and LED/BL.
 
 Selecting **ESP32 Dev Module** is fine for a generic ESP-WROOM-32 board. Choose the correct CP2102 COM port and upload. Open Serial Monitor at 115200 baud. Successful telemetry reports `PaperBriq POST: 202`.
 
@@ -50,13 +55,19 @@ For API-key protection, set `IOT_API_KEY` in the backend `.env` and put the same
 
 Both sketches use 9600 baud for this UART link. Never connect the Uno's 5 V TX output directly to an ESP32 input. The grounds must share a reference, but motor and servo current must not flow through the breadboard or logic wiring.
 
-The ESP32 polls Render for the oldest queued command, forwards `START`, `STOP`, `RESET`, or `SELF_TEST` to the Uno, and reports acknowledgements and machine events back to Render. It never drives a motor or servo directly and does not start movement at boot. Version 2 health reports include door, fan-command, unlock-command and component-test state. See [Check machine](../MACHINE_CHECK.md) for the supervised tests and required updates.
+The ESP32 polls Render for the oldest queued command, forwards `START`, `STOP`, `RESET`, `SELF_TEST`, or bounded `HEATER:<seconds>` / `PUMP:<seconds>` commands to the Uno, and reports acknowledgements and machine events back to Render. It never drives a motor or servo directly and does not start movement at boot. Version 3 health reports add timed-output support, commanded heater/pump states, and readiness to the version 2 chamber fields. Older Uno reports remain readable but cannot enable the app timer controls. See [app timer controls](../TIMED_CONTROLS.md) and [Check machine](../MACHINE_CHECK.md) for the supervised tests and required updates.
 
 The TFT header follows Uno machine events and displays `GETTING READY`, `READY / CHECK`, `PROCESS RUNNING`, `PROCESS COMPLETE`, `STOPPED`, or `FAULT / CHECK`. Its status dot blinks while preparing, after completion, and during a fault. The Wi-Fi dot at the right of the header remains green when connected and red when disconnected.
 
 Upload this ESP32 sketch and `ArduinoUnoMotorTest.ino` to their respective boards. The IDs and keys must match the backend. When testing, issue Reset first to arm the Uno, then Start. Stop is latched until a later Reset.
 
 ## Command acknowledgement troubleshooting
+
+Production timers also use `PP`/`DD` start actions and `PT`/`DT` live edits with
+run IDs. A matched `PROD` report accompanies HEALTH and carries output state,
+limits, total/elapsed/remaining seconds. The bridge forwards debounced paper
+detection for pump triggering only; it does not treat that signal as chamber
+loading. See [production timers](../TIMED_CONTROLS.md) for gates and commissioning.
 
 The `ack-diagnostics-v4` startup marker identifies the updated bridge. Upload
 `PaperBriqMonitor.ino` to the ESP32 and use its USB monitor at 115200 baud.

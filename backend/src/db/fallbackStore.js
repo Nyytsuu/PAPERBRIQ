@@ -18,6 +18,7 @@ function createFallbackStore() {
   const deviceEvents = [];
   const devicePresence = new Map();
   const machineHealth = new Map();
+  const productionSettings = new Map();
 
   function touchDevice(deviceId) {
     devicePresence.set(deviceId, new Date().toISOString());
@@ -308,6 +309,13 @@ function createFallbackStore() {
     },
     async recordMachineHealth(deviceId, health) {
       machineHealth.set(deviceId, { health, recordedAt: new Date().toISOString() });
+    },
+    async getProductionSettings(deviceId) {
+      return productionSettings.get(deviceId) || { pumpSeconds: null, dryingSeconds: null };
+    },
+    async saveProductionSettings(deviceId, settings) {
+      const saved = { ...settings, updatedAt: new Date().toISOString() };
+      productionSettings.set(deviceId, saved); return saved;
     },
     async getMachineHealth(deviceId) {
       return machineHealth.get(deviceId) || null;

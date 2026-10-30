@@ -7,7 +7,8 @@ over the existing UART link; it does not need another sensor connection.
 ## Update and test
 
 1. Upload the updated `PaperBriqMonitor` to the ESP32 using the existing
-   `secrets.h`. TFT operation is disabled by default while disconnected.
+   `secrets.h`. TFT operation is enabled by default again; define
+   `PAPERBRIQ_TFT_ENABLED 0` in `secrets.h` if the screen stays disconnected.
 2. Upload the updated `ArduinoUnoMotorTest` to the Uno, with actuator power
    disconnected during the update.
 3. Power both boards. Open **Uno Serial Monitor at 9600 baud** and send **S**.
@@ -61,6 +62,6 @@ Replies must match the pending request. They do not change actuator replay IDs
 or clear a software stop. Simulated tests cover errors, stale/invalid replies
 and preservation of stopped outputs; they do not test the physical sensor.
 
-To restore the TFT later, add `#define PAPERBRIQ_TFT_ENABLED 1` to ESP32
+To override a disabled TFT setting, use `#define PAPERBRIQ_TFT_ENABLED 1` in ESP32
 `secrets.h` and upload again. Existing display pins and rotation are retained.
 Heater control remains disabled; this update only monitors the chamber.

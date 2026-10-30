@@ -273,6 +273,17 @@ function createPostgresStore(databaseUrl) {
         [deviceId, JSON.stringify(health)]
       );
     },
+    async getProductionSettings(deviceId) {
+      await ensureControlSchema();
+      const result = await pool.query('SELECT settings FROM device_production_settings WHERE device_id=$1', [deviceId]);
+      return result.rows[0]?.settings || { pumpSeconds: null, dryingSeconds: null };
+    },
+    async saveProductionSettings(deviceId, settings) {
+      await ensureControlSchema();
+      const saved = { ...settings, updatedAt: new Date().toISOString() };
+      await pool.query('INSERT INTO device_production_settings(device_id, settings) VALUES($1,$2::jsonb) ON CONFLICT(device_id) DO UPDATE SET settings=EXCLUDED.settings', [deviceId, JSON.stringify(saved)]);
+      return saved;
+    },
     async getMachineHealth(deviceId) {
       await ensureControlSchema();
       const result = await pool.query(
@@ -339,6 +350,7 @@ function createPostgresStore(databaseUrl) {
 }
 
 async function ensureDeviceControlSchema(pool) {
+  await pool.query('CREATE TABLE IF NOT EXISTS device_production_settings (device_id VARCHAR(80) PRIMARY KEY, settings JSONB NOT NULL)');
   await pool.query(
     `CREATE TABLE IF NOT EXISTS device_machine_health (
        device_id VARCHAR(80) PRIMARY KEY,
@@ -350,7 +362,7 @@ async function ensureDeviceControlSchema(pool) {
     `CREATE TABLE IF NOT EXISTS device_commands (
        id UUID PRIMARY KEY,
        device_id VARCHAR(80) NOT NULL,
-       command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test')),
+       command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT):[0-9A-F]{8}:[1-9][0-9]{0,6}$'),
        status VARCHAR(20) NOT NULL DEFAULT 'queued'
          CHECK (status IN ('queued', 'delivered', 'completed', 'failed', 'expired')),
        idempotency_key VARCHAR(120),
@@ -366,7 +378,7 @@ async function ensureDeviceControlSchema(pool) {
   await pool.query(
     `ALTER TABLE device_commands
        DROP CONSTRAINT IF EXISTS device_commands_command_check,
-       ADD CONSTRAINT device_commands_command_check CHECK (command IN ('start', 'stop', 'reset', 'self_test'))`
+       ADD CONSTRAINT device_commands_command_check CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT):[0-9A-F]{8}:[1-9][0-9]{0,6}$')`
   );
   await pool.query(
     `CREATE INDEX IF NOT EXISTS idx_device_command_queue

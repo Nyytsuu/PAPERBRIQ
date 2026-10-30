@@ -182,6 +182,11 @@ CREATE TABLE IF NOT EXISTS process_actions (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS device_production_settings (
+  device_id VARCHAR(80) PRIMARY KEY,
+  settings JSON NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS device_commands (
   id CHAR(36) PRIMARY KEY,
   device_id VARCHAR(80) NOT NULL,

@@ -74,10 +74,27 @@ emergency power removal is separate. Failed communications cannot force a
 failed relay board off. Independent hardware protection and mechanical support
 remain necessary; input closure does not prove lock engagement.
 
-## Later drying stage
+## Production pump and drying stage
 
-Adjustable time and temperature remain deferred until the MOSFET and heater
-power circuit are verified. The supplied labels specify a 12 V / 100 W heater
+Legacy supervised tests can be enabled on **Uno D3 for the pump (3 seconds)**
+and **D4 for the heater (10 seconds)** through `PAPERBRIQ_STANDALONE_BENCH=1`. See the
+[standalone test instructions](ArduinoUnoMotorTest/README.md#current-standalone-function-test-mode)
+for J/Y commands, cooldowns, thermostat/airflow/water requirements and limitations.
+These tests are separate from the automatic component check and production cycle.
+Normal verification flags remain 0; pump suppression and an independent heater
+cutoff remain outstanding. Restore standalone mode to 0 after the brief checks.
+Thermostat S1 must not connect to **A4**, which is the I2C data line. A current
+fuse does not replace an independent temperature-operated cutoff. Normal heater
+testing requires a fresh ESP32 temperature reply; temporary standalone testing
+relies on the external thermostat instead.
+
+The revised app saves production durations on the server and sends run-specific
+start/time-adjustment commands. The Uno owns the deadlines and reports remaining
+time. The paper sensor triggers one water run during mixing; drying starts
+separately after loading. Hardware verification flags and maximum operating
+durations remain unset, so production output is disabled until commissioning.
+See [production timer controls](TIMED_CONTROLS.md). Temperature is set on the
+external thermostat. The supplied labels specify a 12 V / 100 W heater
 (about 8.3 A at rated power), and a 12 V power-to-unlock LY-03B lock whose listing
 limits energization to 10 seconds. Firmware uses a 1-second lock pulse.
 Supply capacity, starting current, wiring, relay/module capacity, airflow,

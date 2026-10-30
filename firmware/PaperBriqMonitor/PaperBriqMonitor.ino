@@ -8,6 +8,11 @@
 #include <SPI.h>
 #include <time.h>
 #include "secrets.h"
+#include "TimedCommands.h"
+#include "ProductionTimer.h"
+String productionJson;
+unsigned long productionReplyAt = 0, paperSampleAt = 0, paperChangedAt = 0;
+bool paperRaw = false, paperStable = false;
 
 // Backward-compatible defaults let an existing secrets.h keep compiling.
 #ifndef PAPERBRIQ_API_BASE_URL
@@ -33,10 +38,10 @@ WiFiMulti wifiMulti;
 
 #define DHTPIN 27
 #define DHTTYPE DHT22
-// The chamber sensor and app work independently of the disconnected TFT.
-// Set to 1 in secrets.h when the display is connected again.
+// TFT restored for reconnection. The chamber sensor and app still work
+// independently; define PAPERBRIQ_TFT_ENABLED 0 in secrets.h to disable it.
 #ifndef PAPERBRIQ_TFT_ENABLED
-#define PAPERBRIQ_TFT_ENABLED 0
+#define PAPERBRIQ_TFT_ENABLED 1
 #endif
 #define IR_PIN 25
 #define IR_DETECTED LOW
@@ -88,6 +93,9 @@ bool healthDoorClosed = false;
 bool healthFanOn = false;
 bool healthUnlockOn = false;
 bool healthTestActive = false;
+bool healthTimedVersion = false, healthTimedSupported = false;
+bool healthHeaterOn = false, healthPumpOn = false;
+bool healthHeaterReady = false, healthPumpReady = false;
 const unsigned long HEALTH_PROBE_INTERVAL_MS = 7000;
 const unsigned long HEALTH_REPLY_TIMEOUT_MS = 5000;
 const unsigned long HEALTH_FRESH_MS = 20000;
@@ -469,7 +477,7 @@ void postTelemetry(bool dhtOK, bool detected, bool waterOK) {
   payload += "\"dht22\":\"" + String(dhtOK ? "Online" : "Attention") + "\",";
   payload += "\"irSensor\":\"Manual check\",\"tftDisplay\":\"" + String(PAPERBRIQ_TFT_ENABLED ? "Manual check" : "Disabled") + "\",\"floatSwitch\":\"Manual check\"},";
   const bool linkFresh = haveHealthReply && millis() - healthReplyAt < HEALTH_FRESH_MS;
-  payload += "\"checks\":{\"version\":" + String(healthChamberSupported ? 2 : 1) + ",\"unoLink\":" + String(linkFresh ? "true" : "false");
+  payload += "\"checks\":{\"version\":" + String(healthTimedVersion ? 3 : healthChamberSupported ? 2 : 1) + ",\"unoLink\":" + String(linkFresh ? "true" : "false");
   payload += ",\"controlIo\":" + String(linkFresh && healthControlIo ? "true" : "false");
   payload += ",\"stopClosed\":" + String(linkFresh && healthStopClosed ? "true" : "false");
   payload += ",\"emergencyClosed\":" + String(linkFresh && healthEmergencyClosed ? "true" : "false");
@@ -479,6 +487,14 @@ void postTelemetry(bool dhtOK, bool detected, bool waterOK) {
   payload += ",\"fanOn\":" + String(linkFresh && healthFanOn ? "true" : "false");
   payload += ",\"unlockOn\":" + String(linkFresh && healthUnlockOn ? "true" : "false");
   payload += ",\"testActive\":" + String(linkFresh && healthTestActive ? "true" : "false");
+  payload += ",\"timedSupported\":" + String(linkFresh && healthTimedSupported ? "true" : "false");
+  payload += ",\"heaterOn\":" + String(linkFresh && healthHeaterOn ? "true" : "false");
+  payload += ",\"pumpOn\":" + String(linkFresh && healthPumpOn ? "true" : "false");
+  payload += ",\"heaterReady\":" + String(linkFresh && healthHeaterReady ? "true" : "false");
+  payload += ",\"pumpReady\":" + String(linkFresh && healthPumpReady ? "true" : "false");
+  if (linkFresh && productionJson.length() && millis() - productionReplyAt < HEALTH_FRESH_MS)
+    payload += ",\"production\":" + productionJson.substring(0, productionJson.length() - 1)
+        + ",\"sampleAgeMs\":" + String(millis() - productionReplyAt) + "}";
   payload += ",\"dht\":" + String(dhtOK ? "true" : "false") + "}}";
 
   String response;
@@ -586,8 +602,12 @@ void cacheFinalCommand(const String &id, const String &status,
 
 void dispatchCommand(const String &id, String action) {
   action.toLowerCase();
+  String timedAction = action; timedAction.toUpperCase();
+  const bool timed = timedCommandSeconds(timedAction.c_str()) > 0;
+  char kind; bool edit; uint32_t run, duration;
+  const bool productionCommand = parseProductionCommand(timedAction.c_str(), kind, edit, run, duration);
   if (!isSafeCommandId(id) ||
-      (action != "start" && action != "stop" && action != "reset" && action != "self_test")) {
+      (action != "start" && action != "stop" && action != "reset" && action != "self_test" && !timed && !productionCommand)) {
     postCommandAck(id, "failed", "unsupported command");
     cacheFinalCommand(id, "failed", "unsupported command");
     enqueueDeviceEvent("command_rejected", "warning", "controller", "stopped",
@@ -740,7 +760,7 @@ void handleUnoHealth(const String &line) {
       line.substring(7, separator) != healthProbeId ||
       millis() - lastHealthProbeAt > HEALTH_REPLY_TIMEOUT_MS) return;
   const String flags = line.substring(separator + 1);
-  if (flags.length() != 9 && flags.length() != 17) return;
+  if (flags.length() != 9 && flags.length() != 17 && flags.length() != 27) return;
   for (uint8_t i = 0; i < flags.length(); ++i) {
     if (i % 2 == 1 ? flags[i] != '|' : (flags[i] != '0' && flags[i] != '1')) return;
   }
@@ -749,14 +769,61 @@ void handleUnoHealth(const String &line) {
   healthEmergencyClosed = flags[4] == '1';
   healthIndicatorIo = flags[6] == '1';
   healthArmed = flags[8] == '1';
-  healthChamberSupported = flags.length() == 17;
+  healthChamberSupported = flags.length() >= 17;
   healthDoorClosed = healthChamberSupported && flags[10] == '1';
   healthFanOn = healthChamberSupported && flags[12] == '1';
   healthUnlockOn = healthChamberSupported && flags[14] == '1';
   healthTestActive = healthChamberSupported && flags[16] == '1';
+  healthTimedVersion = flags.length() == 27;
+  healthTimedSupported = healthTimedVersion && flags[18] == '1';
+  healthHeaterOn = healthTimedVersion && flags[20] == '1';
+  healthPumpOn = healthTimedVersion && flags[22] == '1';
+  healthHeaterReady = healthTimedVersion && flags[24] == '1';
+  healthPumpReady = healthTimedVersion && flags[26] == '1';
   healthReplyAt = millis();
   haveHealthReply = true;
   healthProbeId = "";
+}
+
+void handleProductionReport(const String &line) {
+  int from = line.indexOf('|', 5);
+  if (from < 0 || !healthProbeId.length() || line.substring(5, from) != healthProbeId ||
+      millis() - lastHealthProbeAt > HEALTH_REPLY_TIMEOUT_MS) return;
+  uint32_t values[10];
+  for (uint8_t i = 0; i < 10; ++i) {
+    int end = line.indexOf('|', from + 1);
+    if ((i < 9 && end < 0) || (i == 9 && end >= 0)) return;
+    String part = end < 0 ? line.substring(from + 1) : line.substring(from + 1, end);
+    if (!part.length() || part.length() > 10) return;
+    uint64_t value = 0;
+    for (size_t j = 0; j < part.length(); ++j) {
+      if (part[j] < '0' || part[j] > '9') return;
+      value = value * 10 + part[j] - '0';
+    }
+    if (value > 0xFFFFFFFFULL) return;
+    values[i] = (uint32_t)value; from = end;
+  }
+  if (values[0] > 2147483 || values[1] > 2147483 || values[2] > 1 || values[3] > 1 ||
+      values[4] > 2 || values[5] > 5 || values[7] > 2147483 || values[9] > values[7]) return;
+  const char *names[] = {"pumpMaxSeconds", "dryingMaxSeconds", "pumpVerified", "dryingVerified",
+      "kind", "phase", "runId", "totalSeconds", "elapsedSeconds", "remainingSeconds"};
+  productionJson = "{\"version\":1";
+  for (uint8_t i = 0; i < 10; ++i) {
+    productionJson += ",\"" + String(names[i]) + "\":" + String(values[i]);
+  }
+  productionJson += '}'; productionReplyAt = millis();
+}
+
+void servicePaperSignal() {
+  const unsigned long now = millis();
+  if (!productionJson.length() || now - productionReplyAt >= HEALTH_FRESH_MS || now - paperSampleAt < 250UL) return;
+  const bool raw = digitalRead(IR_PIN) == IR_DETECTED;
+  if (now - paperSampleAt > 1000UL || raw != paperRaw) { paperRaw = raw; paperChangedAt = now; }
+  paperSampleAt = now;
+  if (now - paperChangedAt >= 100UL) {
+    paperStable = raw;
+    unoLink.println(paperStable ? "IR|1" : "IR|0");
+  }
 }
 
 void serviceHealthProbe() {
@@ -828,6 +895,7 @@ void serviceUnoLink() {
 
         if (unoLine.startsWith("ACK|")) handleUnoAck(unoLine);
         else if (unoLine.startsWith("EVENT|")) handleUnoEvent(unoLine);
+        else if (unoLine.startsWith("PROD|")) handleProductionReport(unoLine);
         else if (unoLine.startsWith("HEALTH|")) handleUnoHealth(unoLine);
         else if (unoLine.startsWith("DHT_CHECK|")) replyDhtCheck(unoLine);
       }
@@ -905,6 +973,7 @@ void setup() {
 }
 
 void loop() {
+  servicePaperSignal();
   // Sample and service local diagnostics before potentially slow networking.
   sampleChamberSensor();
   serviceSensorSerial();
