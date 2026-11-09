@@ -128,15 +128,15 @@ public class AppShell {
     private void showMenu(AppController controller) {
         String accountId = controller.canControlMachine() && !controller.session().user.isNull("id")
             ? controller.session().user.optString("id").trim() : "";
-        boolean demoAdmin = controller.isDemoAdmin();
+        boolean machineKeySetup = controller.usesMachineKeySetup();
         String[] options = accountId.isEmpty()
             ? new String[]{"Log out"}
-            : new String[]{demoAdmin ? "Machine access" : "Operator account ID", "Log out"};
+            : new String[]{machineKeySetup ? "Machine access" : "Operator account ID", "Log out"};
         new AlertDialog.Builder(controller.activity())
             .setTitle("PaperBriq")
             .setItems(options, (dialog, which) -> {
                 if (!accountId.isEmpty() && which == 0) {
-                    if (demoAdmin) controller.signInForMachineAccess();
+                    if (machineKeySetup) controller.signInForMachineAccess();
                     else showOperatorId(controller, accountId);
                 } else {
                     controller.confirmAction("Log out?", "You will need to sign in again.", controller::logout);

@@ -9,10 +9,16 @@ const { validateSettings, buildProductionControls, encodeProductionCommand } = r
 const { readJson, sendJson } = require("./json");
 const { streamLive } = require("./liveStream");
 const { getReportsWithMonths } = require("../data/monthlyReports");
-const { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport } = require("./operatorSessions");
+const {
+  getOperator, getMachineAdmin, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport,
+  machineAdminPassword, MACHINE_ADMIN_ID, MACHINE_ADMIN_EMAIL
+} = require("./operatorSessions");
 const { requestMachineKey, approveMachineKey, redeemMachineKey, validPhoneApproval } = require("./machineKeyRequests");
 
 const MACHINE_DEVICE_ID = "paperbriq-esp32";
+const ADMIN_LOGIN_WINDOW_MS = 5 * 60 * 1000;
+let adminLoginWindowEndsAt = 0;
+let failedAdminLogins = 0;
 
 async function routeApi(req, res, requestUrl) {
   if (req.method === 'POST' && requestUrl.pathname === '/api/device/production-settings') {
@@ -236,8 +242,14 @@ async function routeApi(req, res, requestUrl) {
       return;
     }
     const body = await readJson(req);
+    const privateAdmin = Boolean(machineAdminPassword(dataStore));
+    const machineAdmin = privateAdmin ? getMachineAdmin(req, dataStore) : null;
+    if (privateAdmin && (!machineAdmin || machineKeyAction === "approve")) {
+      sendJson(res, 403, { error: "Sign in with the private PaperBriq admin password to approve this phone." });
+      return;
+    }
     if (machineKeyAction === "request") {
-      const request = requestMachineKey();
+      const request = requestMachineKey(machineAdmin);
       sendJson(res, request ? 201 : 429, request || { error: "Too many requests. Try again in five minutes." });
       return;
     }
@@ -251,7 +263,8 @@ async function routeApi(req, res, requestUrl) {
       sendJson(res, approved ? 200 : 404, approved ? { ok: true } : { error: "No active request for that key." });
       return;
     }
-    const { status, ...result } = redeemMachineKey(key, requestId, code);
+    const { status, ...result } = redeemMachineKey(key, requestId, code, machineAdmin);
+    if (machineAdmin && result.approved) machineAdmin.pendingMachineApproval = false;
     sendJson(res, status, result);
     return;
   }
@@ -272,7 +285,37 @@ async function routeApi(req, res, requestUrl) {
       return;
     }
 
-    const user = await dataStore.login(email, password, role);
+    const controlKey = String(process.env.CONTROL_API_KEY || "").trim();
+    const privatePassword = machineAdminPassword(dataStore);
+    const privateAdminLogin = Boolean(privatePassword) && email === MACHINE_ADMIN_EMAIL;
+    let user;
+    if (privateAdminLogin) {
+      if (!secureTransport(req) || !isSessionWrite(req)) {
+        sendJson(res, 403, { error: "Private admin sign-in requires a secure connection." });
+        return;
+      }
+      if (!controlKey || privatePassword.length < 16 || privatePassword === controlKey) {
+        sendJson(res, 503, { error: "Set a separate private admin password of at least 16 characters on the server." });
+        return;
+      }
+      const now = Date.now();
+      if (now >= adminLoginWindowEndsAt) {
+        adminLoginWindowEndsAt = now + ADMIN_LOGIN_WINDOW_MS;
+        failedAdminLogins = 0;
+      }
+      if (failedAdminLogins >= 10) {
+        sendJson(res, 429, { error: "Too many admin sign-in attempts. Try again in a few minutes." });
+        return;
+      }
+      if ((!role || role === "admin") && secretsMatch(privatePassword, password)) {
+        failedAdminLogins = 0;
+        user = { id: MACHINE_ADMIN_ID, fullName: "PaperBriq Admin", email, role: "admin", roleLabel: "Administrator", barangay: "Central" };
+      } else {
+        failedAdminLogins++;
+      }
+    } else {
+      user = await dataStore.login(email, password, role);
+    }
 
     if (!user) {
       sendJson(res, 401, { error: "Invalid PaperBriq credentials." });
@@ -281,10 +324,9 @@ async function routeApi(req, res, requestUrl) {
 
     const summary = await dataStore.getSummary();
     res.setHeader("Cache-Control", "no-store");
-    const controlKey = String(process.env.CONTROL_API_KEY || "").trim();
-    const demoEnrollmentVerified = remoteControlFlagEnabled() &&
+    const demoEnrollmentVerified = privateAdminLogin || (!privatePassword && remoteControlFlagEnabled() &&
       (validPhoneApproval(controlKey, req.headers["x-phone-approval"]) ||
-        secretsMatch(controlKey, req.headers["x-control-key"]));
+        secretsMatch(controlKey, req.headers["x-control-key"])));
     replaceOperatorSession(req, res, dataStore, user, demoEnrollmentVerified);
     sendJson(res, 200, { user, summary });
     return;

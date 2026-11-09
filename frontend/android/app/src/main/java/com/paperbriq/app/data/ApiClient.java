@@ -86,15 +86,27 @@ public class ApiClient {
     }
 
     public JSONObject requestMachineKey() throws Exception {
-        return postJsonTo(requireMachineKeyOrigin(), "/api/auth/machine-key/request", new JSONObject(), Collections.emptyMap());
+        return postMachineKey("/api/auth/machine-key/request", new JSONObject());
     }
 
-    public String approvePhone(String requestId, String code) throws Exception {
+    public String approvePhone(String requestId, String code, boolean privateAdmin) throws Exception {
         JSONObject body = new JSONObject().put("requestId", requestId).put("code", code);
-        JSONObject response = postJsonTo(requireMachineKeyOrigin(), "/api/auth/machine-key/redeem", body, Collections.emptyMap());
+        JSONObject response = postMachineKey("/api/auth/machine-key/redeem", body);
+        if (privateAdmin) {
+            if (response.optBoolean("approved")) return null;
+            throw new IllegalStateException("PaperBriq could not verify this sign-in.");
+        }
         String receipt = response.getString("receipt");
         if (!isPhoneApproval(receipt)) throw new IllegalStateException("PaperBriq could not verify this phone.");
         return receipt;
+    }
+
+    private JSONObject postMachineKey(String endpoint, JSONObject body) throws Exception {
+        String origin = requireMachineKeyOrigin();
+        OperatorSession active = operatorSession;
+        Map<String, String> headers = active != null && origin.equals(active.baseUrl)
+            ? Collections.singletonMap("Cookie", active.cookie) : Collections.emptyMap();
+        return postJsonTo(origin, endpoint, body, headers);
     }
 
     public static boolean isPhoneApproval(String value) {

@@ -3,6 +3,12 @@ const { createHash, randomBytes } = require("crypto");
 const COOKIE = "paperbriqOperator";
 const SESSION_MS = 8 * 60 * 60 * 1000;
 const sessions = new Map();
+const MACHINE_ADMIN_ID = "machine-admin";
+const MACHINE_ADMIN_EMAIL = "admin@paperbriq.local";
+
+function machineAdminPassword(store) {
+  return store.configured ? "" : String(process.env.MACHINE_ADMIN_PASSWORD || "");
+}
 
 function operatorConfigured(store) {
   return store.configured && approvedIds().length > 0;
@@ -19,9 +25,12 @@ function eligibleOperator(user, store) {
 
 function demoEnrollmentFingerprint(user, store) {
   const key = String(process.env.CONTROL_API_KEY || "").trim();
-  return !store.configured && user?.id === "demo-admin" && user.role === "admin" && key
-    ? createHash("sha256").update(key).digest("hex")
-    : null;
+  if (store.configured || user?.role !== "admin" || !key) return null;
+  const password = machineAdminPassword(store);
+  if (user.id === MACHINE_ADMIN_ID && password.length >= 16 && password !== key) {
+    return createHash("sha256").update(JSON.stringify([key, password])).digest("hex");
+  }
+  return user.id === "demo-admin" && !password ? createHash("sha256").update(key).digest("hex") : null;
 }
 
 function secureTransport(req) {
@@ -45,7 +54,7 @@ function sessionToken(req) {
   return match?.[1];
 }
 
-function getOperator(req, store) {
+function readOperator(req, store) {
   if (!allowedTransport(req)) return null;
   const token = sessionToken(req);
   const operator = sessions.get(token);
@@ -58,6 +67,16 @@ function getOperator(req, store) {
     return null;
   }
   return operator;
+}
+
+function getOperator(req, store) {
+  const operator = readOperator(req, store);
+  return operator?.pendingMachineApproval ? null : operator;
+}
+
+function getMachineAdmin(req, store) {
+  const operator = readOperator(req, store);
+  return operator?.id === MACHINE_ADMIN_ID ? operator : null;
 }
 
 function replaceOperatorSession(req, res, store, user, demoEnrollmentVerified = false) {
@@ -77,8 +96,14 @@ function replaceOperatorSession(req, res, store, user, demoEnrollmentVerified = 
   }
   if (sessions.size >= 256) sessions.delete(sessions.keys().next().value);
   const token = randomBytes(32).toString("hex");
-  sessions.set(token, { id: user.id, role: user.role, demoEnrollment, expiresAt: now + SESSION_MS });
+  sessions.set(token, {
+    id: user.id, role: user.role, demoEnrollment, expiresAt: now + SESSION_MS,
+    pendingMachineApproval: user.id === MACHINE_ADMIN_ID
+  });
   res.setHeader("Set-Cookie", `${COOKIE}=${token}; ${attributes}; Max-Age=${SESSION_MS / 1000}`);
 }
 
-module.exports = { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport };
+module.exports = {
+  getOperator, getMachineAdmin, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport,
+  machineAdminPassword, MACHINE_ADMIN_ID, MACHINE_ADMIN_EMAIL
+};

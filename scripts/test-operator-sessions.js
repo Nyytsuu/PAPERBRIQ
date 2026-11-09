@@ -5,6 +5,7 @@ test("machine sign-in requires an approved active operator and stays scoped to o
   process.env.DATABASE_URL = "";
   process.env.DB_CLIENT = "none";
   process.env.CONTROL_API_KEY = "";
+  process.env.MACHINE_ADMIN_PASSWORD = "";
   process.env.REMOTE_CONTROL_ENABLED = "true";
   process.env.MACHINE_OPERATOR_IDS = "operator-1";
   const { dataStore } = require("../backend/src/db");
@@ -130,6 +131,37 @@ test("machine sign-in requires an approved active operator and stays scoped to o
     process.env.CONTROL_API_KEY = "rotated-machine-test-key";
     assert.match((await login("demo@example.test", receiptHeaders)).headers.get("set-cookie"), /Max-Age=0/);
     assert.equal((await stop({ ...https, Cookie: second })).status, 401);
+
+    process.env.CONTROL_API_KEY = machineKey["X-Control-Key"];
+    process.env.MACHINE_ADMIN_PASSWORD = "fixture private password";
+    const privateLogin = (password, headers = https) =>
+      post("/api/auth/login", { email: "admin@paperbriq.local", password, role: "admin" }, headers);
+    assert.equal((await privateLogin("paperbriq123")).status, 401);
+    assert.equal((await privateLogin(process.env.MACHINE_ADMIN_PASSWORD, {})).status, 403);
+    assert.match((await login("demo@example.test", receiptHeaders)).headers.get("set-cookie"), /Max-Age=0/);
+    assert.equal((await pairing("request", {})).status, 403);
+    const privateSignIn = await privateLogin(process.env.MACHINE_ADMIN_PASSWORD);
+    assert.equal(privateSignIn.status, 200);
+    assert.equal((await privateSignIn.json()).user.id, "machine-admin");
+    const privateHeaders = { ...https, Cookie: privateSignIn.headers.get("set-cookie").split(";")[0] };
+    assert.equal((await controlStatus(privateHeaders)).operatorAuthorized, false);
+    assert.equal((await stop(privateHeaders)).status, 401);
+    const privateRequest = await (await pairing("request", {}, privateHeaders)).json();
+    assert.match(privateRequest.code, /^[0-9]{6}$/);
+    assert.equal((await pairing("redeem", privateRequest)).status, 403);
+    const privateApproval = await pairing("redeem", privateRequest, privateHeaders);
+    assert.deepEqual(await privateApproval.json(), { approved: true });
+    assert.equal((await pairing("redeem", privateRequest, privateHeaders)).status, 404);
+    assert.equal((await controlStatus(privateHeaders)).operatorAuthorized, true);
+    assert.equal((await stop(privateHeaders, "other-machine")).status, 403);
+    assert.equal((await stop(privateHeaders)).status, 201);
+    assert.equal((await post("/api/auth/logout", {}, privateHeaders)).status, 200);
+    assert.equal((await stop(privateHeaders)).status, 401);
+    assert.equal((await pairing("request", {}, privateHeaders)).status, 403);
+    const nextSignIn = await privateLogin(process.env.MACHINE_ADMIN_PASSWORD);
+    const nextHeaders = { ...https, Cookie: nextSignIn.headers.get("set-cookie").split(";")[0] };
+    assert.equal((await controlStatus(nextHeaders)).operatorAuthorized, false);
+    assert.equal((await pairing("redeem", privateRequest, nextHeaders)).status, 404);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

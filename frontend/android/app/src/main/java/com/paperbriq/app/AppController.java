@@ -441,6 +441,15 @@ public class AppController {
         return user != null && "demo-admin".equals(user.optString("id")) && "admin".equals(user.optString("role"));
     }
 
+    private boolean isPrivateMachineAdmin() {
+        JSONObject user = session.user;
+        return user != null && "machine-admin".equals(user.optString("id")) && "admin".equals(user.optString("role"));
+    }
+
+    public boolean usesMachineKeySetup() {
+        return isDemoAdmin() || isPrivateMachineAdmin();
+    }
+
     private JSONObject getMachineControlStatus() throws Exception {
         return apiClient.getJson(DEVICE_STATUS);
     }
@@ -501,6 +510,16 @@ public class AppController {
     }
 
     public void signInForMachineAccess() {
+        if (isPrivateMachineAdmin()) {
+            if (!apiClient.hasOperatorSession()) {
+                confirmAction("Sign in again?", "Use your private admin password to request a machine key.", this::logout);
+            } else if (hasMachineAccess()) {
+                showInfoDialog("Machine access active", "This sign-in is approved for PaperBriq.");
+            } else {
+                showDemoMachineKeyDialog();
+            }
+            return;
+        }
         if (isDemoAdmin()) {
             JSONObject status = session.pagePayload("deviceControl");
             if (apiClient.hasOperatorSession()) {
@@ -552,7 +571,7 @@ public class AppController {
                     try {
                         JSONObject key = apiClient.requestMachineKey();
                         activity.runOnUiThread(() -> {
-                            if (!dialog.isShowing() || !isDemoAdmin()) return;
+                            if (!dialog.isShowing() || !usesMachineKeySetup()) return;
                             dialog.dismiss();
                             showMachineKeyApproval(key.optString("requestId"), key.optString("code"));
                         });
@@ -570,6 +589,7 @@ public class AppController {
     }
 
     private void showMachineKeyApproval(String requestId, String code) {
+        boolean privateAdmin = isPrivateMachineAdmin();
         LinearLayout form = ui.column();
         form.setPadding(ui.dp(20), 0, ui.dp(20), 0);
         TextView display = ui.text(code, 28, AppColors.INK, Typeface.BOLD);
@@ -588,7 +608,9 @@ public class AppController {
         form.addView(input, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
         AlertDialog dialog = new AlertDialog.Builder(activity)
             .setTitle("Approve this phone")
-            .setMessage("Give this key to the machine administrator. After they approve it, paste it below within five minutes.")
+            .setMessage(privateAdmin
+                ? "Copy and paste this six-digit key below within five minutes."
+                : "Give this key to the machine administrator. After they approve it, paste it below within five minutes.")
             .setView(form)
             .setPositiveButton("Approve phone", null)
             .setNeutralButton("Request new key", (ignored, which) -> showDemoMachineKeyDialog())
@@ -609,11 +631,14 @@ public class AppController {
                 dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
                 executor.execute(() -> {
                     try {
-                        String receipt = apiClient.approvePhone(requestId, enteredCode);
-                        machineKeyStore.save(apiClient.machineKeyOrigin(), receipt);
+                        String receipt = apiClient.approvePhone(requestId, enteredCode, privateAdmin);
+                        if (receipt != null) machineKeyStore.save(apiClient.machineKeyOrigin(), receipt);
                         activity.runOnUiThread(() -> {
                             dialog.dismiss();
-                            if (isDemoAdmin()) {
+                            if (privateAdmin && isPrivateMachineAdmin()) {
+                                loadPagePayload(session.currentPage, true);
+                                showInfoDialog("Phone approved", "Machine access is active for this sign-in.");
+                            } else if (isDemoAdmin()) {
                                 confirmAction("Phone approved", "Sign in again to activate machine access.", this::logout);
                             }
                         });
