@@ -5,8 +5,7 @@ public final class ScreenRegistry {
         new DashboardScreen(),
         new IotMonitoringScreen(),
         new ProcessTrackingScreen(),
-        new ReportsScreen(),
-        new HistoryScreen()
+        new ReportsScreen()
     };
 
     private ScreenRegistry() {

@@ -1,6 +1,4 @@
 #pragma once
-NEW SKETCH
-
 #include <stdint.h>
 #include <string.h>
 
@@ -23,7 +21,7 @@ struct ProductionTimer {
   bool start(char output, uint32_t id, uint32_t seconds, uint32_t maximum,
              bool verified, bool inputsReady, uint32_t now) {
     if (active() || !verified || !inputsReady || !id || id == run ||
-        (output != 'P' && output != 'D') || !seconds || !maximum ||
+        (output != 'P' && output != 'D' && output != 'H') || !seconds || !maximum ||
         seconds > maximum || maximum > 2147483UL) return false;
     kind = output; run = id; total = seconds; startedAt = now; elapsedAtEnd = 0;
     phase = output == 'P' ? WAITING : RUNNING;
@@ -54,11 +52,12 @@ struct ProductionTimer {
   }
 };
 
-// PP=arm paper-triggered pump, DD=start drying, PT/DT=edit current total.
+// PP=arm pump, DD=start drying, HH=start bounded preheat, PT/DT=edit total.
 // Eight hex digits identify the run independently from command delivery IDs.
 inline bool parseProductionCommand(const char *s, char &kind, bool &edit,
                                    uint32_t &run, uint32_t &seconds) {
-  if (strlen(s) < 13 || (s[0] != 'P' && s[0] != 'D') ||
+  if (strlen(s) < 13 || (s[0] != 'P' && s[0] != 'D' && s[0] != 'H') ||
+      (s[0] == 'H' && s[1] != 'H') ||
       (s[1] != s[0] && s[1] != 'T') || s[2] != ':' || s[11] != ':') return false;
   run = 0;
   for (uint8_t i = 3; i < 11; ++i) {

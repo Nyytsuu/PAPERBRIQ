@@ -161,8 +161,7 @@ public class SettingsScreen implements AppScreen {
         LinearLayout actions = ui.row();
         actions.setGravity(Gravity.CENTER_VERTICAL);
         actions.setPadding(0, ui.dp(12), 0, 0);
-        actions.addView(actionButton(ui, "View History", () -> controller.showPage("history")), actionParams(ui, 0));
-        actions.addView(actionButton(ui, "Download Record", () -> controller.showInfoDialog("Contribution record", "Your contribution record download request has been prepared for this account.")), actionParams(ui, ui.dp(8)));
+        actions.addView(actionButton(ui, "Download Record", () -> controller.showInfoDialog("Contribution record", "Your contribution record download request has been prepared for this account.")), actionParams(ui, 0));
         card.addView(actions);
         return card;
     }

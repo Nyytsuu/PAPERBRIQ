@@ -1,4 +1,5 @@
 const { dataStore } = require("../db");
+const { getReportsWithMonths } = require("../data/monthlyReports");
 
 const DEFAULT_CHANNELS = ["dashboard", "reports", "iot"];
 const STREAM_INTERVAL_MS = 2500;
@@ -69,7 +70,7 @@ async function buildLiveSnapshot(channels) {
     }
 
     if (channel === "reports") {
-      payload.reports = await dataStore.getReports();
+      payload.reports = await getReportsWithMonths(dataStore);
     }
 
     if (channel === "iot") {

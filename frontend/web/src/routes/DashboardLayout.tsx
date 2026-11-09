@@ -9,7 +9,7 @@ import { connectLiveStream } from "../api/liveStream";
 const routeBySection = {
   overview: "/monitoring",
   iot: "/monitoring/telemetry",
-  reports: "/monitoring/history"
+  reports: "/monitoring/reports"
 };
 
 function getActiveSection(pathname) {
@@ -35,7 +35,7 @@ export default function DashboardLayout({ user, summary, onLogout, onUserUpdate 
   const visibleNav = [
     ["overview", "Live Overview", "dashboard", "System health", routeBySection.overview],
     ["iot", "Telemetry", "iot", "Sensors & alerts", routeBySection.iot],
-    ["reports", "History", "reports", "Trends & impact", routeBySection.reports]
+    ["reports", "Reports", "reports", "Production totals", routeBySection.reports]
   ];
 
   function navigateToSection(sectionKey) {

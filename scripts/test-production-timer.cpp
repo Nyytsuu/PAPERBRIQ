@@ -1,6 +1,6 @@
 #include <cassert>
 #include <iostream>
-#include "../firmware/ArduinoUnoMotorTest/ProductionTimer.h"
+#include "../firmware/PaperBriqController/ProductionTimer.h"
 int main() {
   ProductionTimer t;
   assert(!t.start('P', 1, 60, 0, true, true, 0));

@@ -61,12 +61,16 @@ public class IotMonitoringScreen implements AppScreen {
             boolean chamberSensor = "Temperature".equalsIgnoreCase(name) || "Humidity".equalsIgnoreCase(name);
             if (chamberSensor && !"passed".equals(dhtStatus)) hasValue = false;
             String value = hasValue ? ui.formatSensorValue(name, sensor.optDouble("value"), sensor.optString("unit", "")) : "--";
-            if (hasValue && "IR Sensor".equalsIgnoreCase(name)) value = sensor.optDouble("value") > 0 ? "Detected" : "Clear";
+            boolean paperSensor = "Shredder Inlet".equalsIgnoreCase(name) || "Shredder Outlet".equalsIgnoreCase(name);
+            if (paperSensor && "Offline".equalsIgnoreCase(sensor.optString("status"))) hasValue = false;
+            if (hasValue && ("IR Sensor".equalsIgnoreCase(name) || paperSensor)) value = sensor.optDouble("value") > 0 ? "Detected" : "Clear";
+            if (!hasValue) value = "--";
             String status = hasValue ? sensor.optString("status", "") : "Waiting for reading";
             if (chamberSensor) status = hasValue ? "Drying chamber" : "attention".equals(dhtStatus) ? "Sensor not responding" : "Waiting for fresh reading";
             if (!hasValue && "Water Flow Rate".equalsIgnoreCase(name)) status = "Flow sensor needed";
             if (!hasValue && "System Pressure".equalsIgnoreCase(name)) status = "Pressure sensor needed";
             if (!hasValue && "Power Output".equalsIgnoreCase(name)) status = "Power meter needed";
+            if (paperSensor && hasValue) status = "Shredder Inlet".equalsIgnoreCase(name) ? "Paper entering" : "Paper leaving";
             String label = "Power Output".equalsIgnoreCase(name) ? "Power use" : ui.equipmentLabel(name);
             views.add(ui.readingCard(label, value.trim(), status,
                 !hasValue || "Warning".equalsIgnoreCase(status) ? AppColors.RED : AppColors.GREEN));

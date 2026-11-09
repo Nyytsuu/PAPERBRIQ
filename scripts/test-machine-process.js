@@ -27,11 +27,17 @@ test('stop, restart and reboot do not reuse a previous run', () => {
 test('completion means forming only and offline never shows a current step', () => {
   const done = buildMachineProcess(status([event('PROCESS_COMPLETED', 3), event('PROCESS_STARTED', 1)]));
   assert.equal(done.state, 'completed');
-  assert.match(done.detail, /Drying is not enabled/);
+  assert.match(done.detail, /Start drying separately/);
   assert(!done.steps.some(s => s.status === 'Current'));
   const offline = buildMachineProcess({...status([event('PROCESS_STARTED', 1)]), device: {connected: false}});
   assert.equal(offline.state, 'unknown');
   assert(!offline.steps.some(s => s.status === 'Current'));
+});
+test('inlet waiting is a reported stage, not shredding or completed movement', () => {
+  const run = buildMachineProcess(status([event('WAITING_FOR_PAPER', 2), event('PROCESS_STARTED', 1)]));
+  assert.equal(run.label, 'Waiting for paper');
+  assert.equal(run.steps.find(s => s.id === 'paper').status, 'Current');
+  assert.equal(run.steps.find(s => s.id === 'shred').status, 'Not reported');
 });
 test('pending start and other device events cannot claim a new run', () => {
   const waiting = buildMachineProcess({...status([event('PROCESS_STARTED', 1)]), commands: [
@@ -40,4 +46,16 @@ test('pending start and other device events cannot claim a new run', () => {
   assert.equal(waiting.hasRun, false);
   const foreign = buildMachineProcess(status([event('PROCESS_STARTED', 1, {deviceId: 'other'})]));
   assert.equal(foreign.hasRun, false);
+});
+
+test('new paper returns the current step from finish-mixing to shredding', () => {
+  const run = buildMachineProcess(status([
+    event('SHREDDER_MIXER_STARTED', 4, {message: 'Paper detected; shredding resumed'}),
+    event('SHREDDER_COMPLETED', 3), event('SHREDDER_MIXER_STARTED', 2),
+    event('PROCESS_STARTED', 1)
+  ]));
+  assert.equal(run.steps.find(s => s.id === 'shred').status, 'Current');
+  assert.equal(run.steps.find(s => s.id === 'mix').status, 'Reported');
+  assert.equal(run.steps.find(s => s.id === 'transfer').status, 'Not reported');
+  assert.equal(run.state, 'running');
 });

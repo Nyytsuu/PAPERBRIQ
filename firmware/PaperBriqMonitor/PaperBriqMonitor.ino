@@ -10,9 +10,18 @@
 #include "secrets.h"
 #include "TimedCommands.h"
 #include "ProductionTimer.h"
+#include "PaperInput.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+// Arduino generates function declarations before the first function body.
+enum MachineDisplayState : uint8_t;
 String productionJson;
-unsigned long productionReplyAt = 0, paperSampleAt = 0, paperChangedAt = 0;
-bool paperRaw = false, paperStable = false;
+unsigned long productionReplyAt = 0;
+SemaphoreHandle_t unoTxMutex = nullptr;
+portMUX_TYPE paperSnapshotMux = portMUX_INITIALIZER_UNLOCKED;
+bool inletDetected = false, outletDetected = false, paperInputsReady = false;
+uint32_t paperInputsAt = 0;
 
 // Backward-compatible defaults let an existing secrets.h keep compiling.
 #ifndef PAPERBRIQ_API_BASE_URL
@@ -45,6 +54,8 @@ WiFiMulti wifiMulti;
 #endif
 #define IR_PIN 25
 #define IR_DETECTED LOW
+#define SHREDDER_IN_PIN 26
+#define SHREDDER_OUT_PIN 19
 #define FLOAT_PIN 32
 
 #define TFT_CS 33
@@ -58,6 +69,51 @@ WiFiMulti wifiMulti;
 #define UNO_LINK_TX 17
 const uint32_t UNO_LINK_BAUD = 9600;
 HardwareSerial unoLink(2);
+
+// Send an entire UART frame under one lock; the sensor task must never insert
+// its heartbeat in the middle of a command or DHT reply.
+void sendUnoFrame(const String &frame) {
+  if (!unoTxMutex || xSemaphoreTake(unoTxMutex, portMAX_DELAY) != pdTRUE) return;
+  unoLink.println(frame);
+  xSemaphoreGive(unoTxMutex);
+}
+
+bool sendPaperFrame(bool detected, bool outlet) {
+  if (!unoTxMutex || xSemaphoreTake(unoTxMutex, portMAX_DELAY) != pdTRUE) return false;
+  unoLink.println(String("IR2|") + (detected ? "1" : "0") + "|" + (outlet ? "1" : "0"));
+  xSemaphoreGive(unoTxMutex);
+  return true;
+}
+
+void paperSensorTask(void *) {
+  PaperInput inlet, outlet;
+  uint32_t sentAt = 0;
+  bool sent = false, lastSent = false, lastOutlet = false;
+  for (;;) {
+    const uint32_t now = millis();
+    inlet.sample(digitalRead(SHREDDER_IN_PIN) == IR_DETECTED, now);
+    outlet.sample(digitalRead(SHREDDER_OUT_PIN) == IR_DETECTED, now);
+    portENTER_CRITICAL(&paperSnapshotMux);
+    inletDetected = inlet.detected; outletDetected = outlet.detected;
+    paperInputsReady = inlet.ready && outlet.ready; paperInputsAt = now;
+    portEXIT_CRITICAL(&paperSnapshotMux);
+    if (inlet.ready && outlet.ready) {
+      if (!sent || lastSent != inlet.detected || lastOutlet != outlet.detected || uint32_t(now - sentAt) >= 250U) {
+        sent = sendPaperFrame(inlet.detected, outlet.detected);
+        if (sent) { lastSent = inlet.detected; lastOutlet = outlet.detected; sentAt = now; }
+      }
+    } else sent = false;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+bool readPaperInputs(bool &inlet, bool &outlet) {
+  portENTER_CRITICAL(&paperSnapshotMux);
+  inlet = inletDetected; outlet = outletDetected;
+  const bool fresh = paperInputsReady && uint32_t(millis() - paperInputsAt) < 1000U;
+  portEXIT_CRITICAL(&paperSnapshotMux);
+  return fresh;
+}
 
 #define PB_BG 0x0841
 #define PB_CARD 0x10A2
@@ -120,6 +176,8 @@ unsigned long lastDisplayStatusBlinkAt = 0;
 bool displayStatusBlinkOn = true;
 
 String unoLine;
+String pendingDhtRequest;
+unsigned long lastUnoByteAt = 0, dhtRequestAt = 0;
 String pendingCommandId;
 String pendingCommandAction;
 unsigned long pendingCommandSentAt = 0;
@@ -472,6 +530,11 @@ void postTelemetry(bool dhtOK, bool detected, bool waterOK) {
     payload += "{\"name\":\"Humidity\",\"value\":" + String(lastHumidity, 1) + ",\"unit\":\"%RH\",\"status\":\"Normal\"},";
   }
   payload += "{\"name\":\"IR Sensor\",\"value\":" + String(detected ? 1 : 0) + ",\"unit\":\"digital\",\"status\":\"Normal\"},";
+  bool inlet, outlet;
+  if (readPaperInputs(inlet, outlet)) {
+    payload += "{\"name\":\"Shredder Inlet\",\"value\":" + String(inlet ? 1 : 0) + ",\"unit\":\"digital\",\"status\":\"Normal\"},";
+    payload += "{\"name\":\"Shredder Outlet\",\"value\":" + String(outlet ? 1 : 0) + ",\"unit\":\"digital\",\"status\":\"Normal\"},";
+  }
   payload += "{\"name\":\"Rainwater Level\",\"value\":" + String(waterOK ? 100 : 0) + ",\"unit\":\"%\",\"status\":\"" + String(waterOK ? "Normal" : "Warning") + "\"}";
   payload += "],\"hardware\":{";
   payload += "\"dht22\":\"" + String(dhtOK ? "Online" : "Attention") + "\",";
@@ -626,10 +689,7 @@ void dispatchCommand(const String &id, String action) {
   }
   String protocolAction = action;
   protocolAction.toUpperCase();
-  unoLink.print("CMD|");
-  unoLink.print(id);
-  unoLink.print('|');
-  unoLink.println(protocolAction);
+  sendUnoFrame("CMD|" + id + "|" + protocolAction);
   Serial.print("Sent command to Uno: ");
   Serial.print(protocolAction);
   Serial.print(" | id="); Serial.println(id);
@@ -725,6 +785,7 @@ void handleUnoEvent(const String &line) {
   String processState = fields[3];
   processState.toLowerCase();
 
+
   if (eventType == "FAULT" || severity == "error" ||
       severity == "critical") {
     setMachineDisplayState(DISPLAY_FAULT);
@@ -789,10 +850,12 @@ void handleProductionReport(const String &line) {
   int from = line.indexOf('|', 5);
   if (from < 0 || !healthProbeId.length() || line.substring(5, from) != healthProbeId ||
       millis() - lastHealthProbeAt > HEALTH_REPLY_TIMEOUT_MS) return;
-  uint32_t values[10];
-  for (uint8_t i = 0; i < 10; ++i) {
+  const bool thermalReport = line.startsWith("PRO2|");
+  const uint8_t count = thermalReport ? 15 : 10;
+  uint32_t values[15];
+  for (uint8_t i = 0; i < count; ++i) {
     int end = line.indexOf('|', from + 1);
-    if ((i < 9 && end < 0) || (i == 9 && end >= 0)) return;
+    if ((i < count - 1 && end < 0) || (i == count - 1 && end >= 0)) return;
     String part = end < 0 ? line.substring(from + 1) : line.substring(from + 1, end);
     if (!part.length() || part.length() > 10) return;
     uint64_t value = 0;
@@ -804,26 +867,17 @@ void handleProductionReport(const String &line) {
     values[i] = (uint32_t)value; from = end;
   }
   if (values[0] > 2147483 || values[1] > 2147483 || values[2] > 1 || values[3] > 1 ||
-      values[4] > 2 || values[5] > 5 || values[7] > 2147483 || values[9] > values[7]) return;
+      values[4] > (thermalReport ? 3 : 2) || values[5] > 5 || values[7] > 2147483 || values[9] > values[7]) return;
+  if (thermalReport && (values[10] > 600 || values[11] < 30 || values[11] > 50 ||
+      values[12] > 1 || values[13] > 4 || values[14] > 1)) return;
   const char *names[] = {"pumpMaxSeconds", "dryingMaxSeconds", "pumpVerified", "dryingVerified",
-      "kind", "phase", "runId", "totalSeconds", "elapsedSeconds", "remainingSeconds"};
-  productionJson = "{\"version\":1";
-  for (uint8_t i = 0; i < 10; ++i) {
+      "kind", "phase", "runId", "totalSeconds", "elapsedSeconds", "remainingSeconds",
+      "preheatMaxSeconds", "targetC", "temperatureFresh", "thermalStage", "heaterFanConfirmed"};
+  productionJson = thermalReport ? "{\"version\":2" : "{\"version\":1";
+  for (uint8_t i = 0; i < count; ++i) {
     productionJson += ",\"" + String(names[i]) + "\":" + String(values[i]);
   }
   productionJson += '}'; productionReplyAt = millis();
-}
-
-void servicePaperSignal() {
-  const unsigned long now = millis();
-  if (!productionJson.length() || now - productionReplyAt >= HEALTH_FRESH_MS || now - paperSampleAt < 250UL) return;
-  const bool raw = digitalRead(IR_PIN) == IR_DETECTED;
-  if (now - paperSampleAt > 1000UL || raw != paperRaw) { paperRaw = raw; paperChangedAt = now; }
-  paperSampleAt = now;
-  if (now - paperChangedAt >= 100UL) {
-    paperStable = raw;
-    unoLink.println(paperStable ? "IR|1" : "IR|0");
-  }
 }
 
 void serviceHealthProbe() {
@@ -831,7 +885,7 @@ void serviceHealthProbe() {
   if (pendingCommandId.length() > 0 || now - lastHealthProbeAt < HEALTH_PROBE_INTERVAL_MS) return;
   lastHealthProbeAt = now;
   healthProbeId = "health-" + String(now, HEX);
-  unoLink.println("CMD|" + healthProbeId + "|CHECK");
+  sendUnoFrame("CMD|" + healthProbeId + "|CHECK");
 }
 
 void sampleChamberSensor() {
@@ -862,6 +916,11 @@ void serviceSensorSerial() {
     if (c == 's' || c == 'S') {
       sampleChamberSensor();
       printChamberSensor();
+      bool inlet, outlet;
+      if (readPaperInputs(inlet, outlet)) {
+        Serial.print("Shredder IN GPIO26: "); Serial.println(inlet ? "DETECTED" : "CLEAR");
+        Serial.print("Shredder OUT GPIO19: "); Serial.println(outlet ? "DETECTED" : "CLEAR");
+      } else Serial.println("Shredder sensors: no fresh sample");
     }
   }
 }
@@ -871,19 +930,18 @@ void replyDhtCheck(const String &request) {
   if (id.length() == 0 || id.length() > 10) return;
   for (size_t i = 0; i < id.length(); i++) if (!isDigit(id[i])) return;
   sampleChamberSensor();
-  const bool fresh = haveDhtReading && millis() - lastSampleAt < 10000UL;
-  unoLink.print("DHT|"); unoLink.print(id);
+  const bool fresh = haveDhtReading && millis() - lastSampleAt < 3000UL;
   if (!fresh) {
-    unoLink.println("|ERROR");
+    sendUnoFrame("DHT|" + id + "|ERROR");
     return;
   }
-  unoLink.print("|OK|"); unoLink.print(lastTemp, 1);
-  unoLink.print('|'); unoLink.println(lastHumidity, 1);
+  sendUnoFrame("DHT|" + id + "|OK|" + String(lastTemp, 1) + "|" + String(lastHumidity, 1));
 }
 
 void serviceUnoLink() {
   while (unoLink.available() > 0) {
     const char c = static_cast<char>(unoLink.read());
+    lastUnoByteAt = millis();
     if (c == '\n') {
       unoLine.trim();
       if (unoLine.length() > 0) {
@@ -895,9 +953,12 @@ void serviceUnoLink() {
 
         if (unoLine.startsWith("ACK|")) handleUnoAck(unoLine);
         else if (unoLine.startsWith("EVENT|")) handleUnoEvent(unoLine);
-        else if (unoLine.startsWith("PROD|")) handleProductionReport(unoLine);
+        else if (unoLine.startsWith("PROD|") || unoLine.startsWith("PRO2|")) handleProductionReport(unoLine);
         else if (unoLine.startsWith("HEALTH|")) handleUnoHealth(unoLine);
-        else if (unoLine.startsWith("DHT_CHECK|")) replyDhtCheck(unoLine);
+        else if (unoLine.startsWith("DHT_CHECK|")) {
+          pendingDhtRequest = unoLine;
+          dhtRequestAt = millis();
+        }
       }
       unoLine = "";
     } else if (c != '\r') {
@@ -926,7 +987,19 @@ void serviceUnoLink() {
                        "Arduino Uno did not acknowledge command", failedId);
 
     // If Uno RX works but its ACK path failed, force a latched stop anyway.
-    unoLink.println("CMD|failsafe-stop|STOP");
+    sendUnoFrame("CMD|failsafe-stop|STOP");
+    return;
+  }
+
+  // The Uno cannot receive while sending a burst of ACKs or events.
+  if (pendingDhtRequest.length() > 0) {
+    if (millis() - dhtRequestAt >= 10000UL) {
+      pendingDhtRequest = "";
+    } else if (!pendingCommandId.length() && !unoLine.length() &&
+               !unoLink.available() && millis() - lastUnoByteAt >= 100UL) {
+      replyDhtCheck(pendingDhtRequest);
+      pendingDhtRequest = "";
+    }
   }
 }
 
@@ -935,7 +1008,7 @@ void setup() {
   delay(300);
   Serial.println();
   Serial.println("PaperBriq monitor starting - automatic Wi-Fi and app connection");
-  Serial.println("Firmware: ack-diagnostics-v4 | DHT22 GPIO27 | USB S and Uno S supported");
+  Serial.println("Firmware: ir-in-out-v9 | DHT22 GPIO27 | USB S and Uno S supported");
 
   if (PAPERBRIQ_TFT_ENABLED) {
   // Match the working TFT-only test before initializing other peripherals.
@@ -960,10 +1033,16 @@ void setup() {
   // Preserve bursts of ACK/EVENT frames during unavoidable network requests.
   unoLink.setRxBufferSize(2048);
   unoLink.begin(UNO_LINK_BAUD, SERIAL_8N1, UNO_LINK_RX, UNO_LINK_TX);
+  unoTxMutex = xSemaphoreCreateMutex();
   bootToken = String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX) + "-" +
               String(millis(), HEX);
   dht.begin();
   pinMode(IR_PIN, INPUT);
+  pinMode(SHREDDER_IN_PIN, INPUT_PULLUP);
+  pinMode(SHREDDER_OUT_PIN, INPUT_PULLUP);
+  if (!unoTxMutex || xTaskCreate(paperSensorTask, "paper-inputs", 3072, nullptr, 1, nullptr) != pdPASS) {
+    Serial.println("Paper input task failed; automatic paper trigger unavailable");
+  }
   pinMode(FLOAT_PIN, INPUT_PULLUP);
   Serial.println("Sensors and Uno link initialized");
   wifiMulti.addAP(HOME_WIFI_SSID, HOME_WIFI_PASSWORD);
@@ -973,7 +1052,6 @@ void setup() {
 }
 
 void loop() {
-  servicePaperSignal();
   // Sample and service local diagnostics before potentially slow networking.
   sampleChamberSensor();
   serviceSensorSerial();

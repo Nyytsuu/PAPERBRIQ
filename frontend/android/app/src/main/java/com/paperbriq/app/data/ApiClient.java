@@ -13,6 +13,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -25,6 +26,7 @@ public class ApiClient {
     private static final int TIMEOUT_MS = 2500;
     private final List<String> apiBaseUrls;
     private final String configuredApiBaseUrl;
+    private volatile OperatorSession operatorSession;
 
     public ApiClient() {
         List<String> urls = new ArrayList<>();
@@ -75,6 +77,57 @@ public class ApiClient {
         throw backendConnectionError(lastError);
     }
 
+    public boolean hasOperatorSession() {
+        return operatorSession != null;
+    }
+
+    public String machineKeyOrigin() {
+        return configuredApiBaseUrl;
+    }
+
+    public JSONObject getMachineKeyStatus(String endpoint, String key) throws Exception {
+        return getJsonFrom(requireMachineKeyOrigin(), endpoint, Collections.singletonMap("X-Control-Key", key));
+    }
+
+    public JSONObject login(JSONObject payload, String enrollmentKey) throws Exception {
+        if (enrollmentKey.isEmpty()) return postJson("/api/auth/login", payload);
+        return postJsonTo(requireMachineKeyOrigin(), "/api/auth/login", payload,
+            Collections.singletonMap("X-Control-Key", enrollmentKey));
+    }
+
+    public String temporaryMachineKey() {
+        OperatorSession active = operatorSession;
+        return active == null ? "" : active.cookie.substring("paperbriqOperator=".length());
+    }
+
+    private String requireMachineKeyOrigin() {
+        if (!configuredApiBaseUrl.startsWith("https://")) {
+            throw new IllegalStateException("Machine key setup requires the configured HTTPS backend.");
+        }
+        return configuredApiBaseUrl;
+    }
+
+    public JSONObject postOperatorJson(String endpoint, JSONObject payload, Map<String, String> headers) throws Exception {
+        OperatorSession active = operatorSession;
+        if (active == null) throw new IllegalStateException("Sign in again with an approved machine operator account.");
+        Map<String, String> requestHeaders = new HashMap<>(headers);
+        requestHeaders.put("Cookie", active.cookie);
+        return postJsonTo(active.baseUrl, endpoint, payload, requestHeaders);
+    }
+
+    public Runnable endOperatorSession() {
+        OperatorSession active = operatorSession;
+        operatorSession = null;
+        return () -> {
+            if (active == null) return;
+            try {
+                postJsonTo(active.baseUrl, "/api/auth/logout", new JSONObject(), Collections.singletonMap("Cookie", active.cookie));
+            } catch (Exception ignored) {
+                // Local access is already cleared. The server session expires independently.
+            }
+        };
+    }
+
     public JSONObject putJson(String endpoint, JSONObject payload) throws Exception {
         Exception lastError = null;
         for (String baseUrl : apiBaseUrls) {
@@ -95,6 +148,12 @@ public class ApiClient {
         connection.setRequestMethod("GET");
         connection.setRequestProperty("Accept", "application/json");
         applyHeaders(connection, headers);
+        if (headers.containsKey("X-Control-Key")) connection.setInstanceFollowRedirects(false);
+        OperatorSession active = operatorSession;
+        if (active != null && baseUrl.equals(active.baseUrl) && endpoint.startsWith("/api/device/control-status?")) {
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("Cookie", active.cookie);
+        }
         connection.setConnectTimeout(TIMEOUT_MS);
         connection.setReadTimeout(TIMEOUT_MS);
 
@@ -118,6 +177,10 @@ public class ApiClient {
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json");
         applyHeaders(connection, headers);
+        boolean login = "/api/auth/login".equals(endpoint);
+        if (login || headers.containsKey("Cookie") || headers.containsKey("X-Control-Key")) {
+            connection.setInstanceFollowRedirects(false);
+        }
         connection.setDoOutput(true);
         connection.setConnectTimeout(TIMEOUT_MS);
         connection.setReadTimeout(TIMEOUT_MS);
@@ -130,8 +193,16 @@ public class ApiClient {
         int status = connection.getResponseCode();
         String response = readStream(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
         JSONObject json = response.isEmpty() ? new JSONObject() : new JSONObject(response);
-        if (status >= 400) {
+        if (status < 200 || status >= 300) {
             throw new BackendResponseException(json.optString("error", "PaperBriq API request failed."));
+        }
+        if (login) {
+            String header = connection.getHeaderField("Set-Cookie");
+            String cookie = header == null ? "" : header.split(";", 2)[0];
+            boolean secure = "https".equals(url.getProtocol()) ||
+                ("http".equals(url.getProtocol()) && url.getHost().matches("localhost|127\\.0\\.0\\.1|10\\.0\\.2\\.2"));
+            operatorSession = secure && cookie.matches("paperbriqOperator=[a-f0-9]{64}")
+                ? new OperatorSession(baseUrl, cookie) : null;
         }
         return json;
     }
@@ -168,6 +239,16 @@ public class ApiClient {
     private static class BackendResponseException extends Exception {
         BackendResponseException(String message) {
             super(message);
+        }
+    }
+
+    private static final class OperatorSession {
+        final String baseUrl;
+        final String cookie;
+
+        OperatorSession(String baseUrl, String cookie) {
+            this.baseUrl = baseUrl;
+            this.cookie = cookie;
         }
     }
 }

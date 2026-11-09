@@ -65,13 +65,25 @@ Upload this ESP32 sketch and `ArduinoUnoMotorTest.ino` to their respective board
 
 Production timers also use `PP`/`DD` start actions and `PT`/`DT` live edits with
 run IDs. A matched `PROD` report accompanies HEALTH and carries output state,
-limits, total/elapsed/remaining seconds. The bridge forwards debounced paper
-detection for pump triggering only; it does not treat that signal as chamber
-loading. See [production timers](../TIMED_CONTROLS.md) for gates and commissioning.
+limits, total/elapsed/remaining seconds. A separate sensor task reads shredder
+IN GPIO26 and OUT GPIO19 even during network waits. IN triggers the prepared
+batch's shredder, mixer and pump after Start and gate closure. Its continuing
+level controls the shredder during feeding: detected runs, clear stops. New
+paper during finish-mixing resumes shredding without restarting the pump.
+OUT is monitoring only. GPIO25 remains a legacy reading and no longer triggers the pump. Serial S
+also prints both new sensor levels. Neither sensor starts drying or proves
+physical machine health. See [production timers](../TIMED_CONTROLS.md).
+
+Preheat uses `HH` commands and version-2 `PRO2` reports with temperature target,
+freshness and warming/ready/drying state. Update both sketches and the app/server.
+The Uno requests fresh DHT samples automatically for thermal supervision; the
+bridge rejects cached DHT samples older than three seconds for these replies.
+The physical thermostat remains responsible for regulation; Wi-Fi or sensor
+delays may stop heating locally rather than extend its permission to run.
 
 The `ack-diagnostics-v4` startup marker identifies the updated bridge. Upload
 `PaperBriqMonitor.ino` to the ESP32 and use its USB monitor at 115200 baud.
-Upload the updated `ArduinoUnoMotorTest.ino` to the Uno for specific Reset
+Upload `PaperBriqController/PaperBriqController.ino` to the Uno for production and specific Reset
 rejection reasons; its USB monitor runs at 9600 baud.
 
 `Sent command to Uno` confirms transmission was requested, not that the Uno
@@ -98,3 +110,23 @@ GPIO16 RX2 connection or a missing common ground.
 Hardware-free checks: `python scripts/test-esp32-ack.py` exercises the actual
 bridge handlers with simulated UART, slow HTTP, and timeouts. The native Uno
 integration test's `reset_ack` mode checks rejection reasons and replay safety.
+
+## Background IR heartbeat (2026-11-06)
+
+Firmware `ir-in-out-v9` samples GPIO26 inlet and GPIO19 outlet in the sensor
+task. Once both inputs have stable samples, it sends IR2|inlet|outlet on changes and
+every 250ms. This is independent of HTTP work, health reports and stage events.
+The previous event gate could leave the Uno waiting without a heartbeat while
+the ESP32 main loop was blocked by a network request. It is removed for the
+NeoSWSerial/hardware-servo Uno configuration. Keep that Uno update installed.
+
+The Uno retains ownership of arming, fresh clear-to-detected qualification,
+three-second A-test pulse and paper-link timeout. Receiving an idle heartbeat
+does not by itself start a motor. No actuator commands are sent by the sensor
+task. TX frames still share the existing mutex. The change addresses availability
+of IR samples; physical detection range, power and wiring still need checking.
+
+Upload this ESP32 sketch, verify ir-in-out-v9 at 115200 baud, then use R,
+wait 3s, and A on the Uno monitor at 9600. After WAITING_FOR_PAPER, clear the
+inlet then present paper. The A test has its normal 2.5s direction settling
+pause followed by a single 3s shredder pulse. X cancels.

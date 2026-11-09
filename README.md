@@ -141,13 +141,29 @@ Add these environment variables to the Render web service, then redeploy it:
 
 ```text
 REMOTE_CONTROL_ENABLED=true
-CONTROL_API_KEY=<long random operator key>
+MACHINE_OPERATOR_IDS=<comma-separated approved operator account IDs>
 IOT_API_KEY=<different long random device key>
 DEVICE_COMMAND_TTL_SECONDS=120
 DEVICE_ONLINE_SECONDS=60
 ```
 
-Set `PAPERBRIQ_API_BASE_URL` in the ESP32 `secrets.h` to the same Render HTTPS origin, set `PAPERBRIQ_IOT_API_KEY` to the Render `IOT_API_KEY`, and keep `PAPERBRIQ_DEVICE_ID` as `paperbriq-esp32`. The web and Android control screens ask for `CONTROL_API_KEY`; they do not store it permanently.
+Set `PAPERBRIQ_API_BASE_URL` in the ESP32 `secrets.h` to the same Render HTTPS origin, set `PAPERBRIQ_IOT_API_KEY` to the Render `IOT_API_KEY`, and keep `PAPERBRIQ_DEVICE_ID` as `paperbriq-esp32`.
+
+On Render, put the approved admin or barangay staff IDs in
+`MACHINE_OPERATOR_IDS`. In the Android app, open **Menu → Operator account ID**
+and tap **Copy ID**. If the app reports a demo account, configure the database
+on Render and sign in again before copying an ID. Change any seeded account passwords before approving
+those accounts. Operators sign in over HTTPS, and the server grants a machine
+session for `paperbriq-esp32` for up to eight hours. Sessions are held in one
+server process and expire on restart. Android keeps its machine session in
+memory, so a restored app profile needs a fresh sign-in for machine access.
+For a single-phone thesis setup in demo mode, set `CONTROL_API_KEY` on the
+backend and sign in to Android as the demo admin. Open **Menu → Machine access**
+and enter the phone approval key once. The app verifies it over HTTPS and stores
+it on that phone with Android Keystore encryption. Sign in again to get a new
+temporary key. Each approved demo sign-in replaces the prior demo session.
+Use **Forget phone** to clear the approval and sign out. No approved-account
+list is needed for this setup.
 
 The ESP32 must verify Render's HTTPS certificate. Put the correct PEM root CA in `PAPERBRIQ_TLS_ROOT_CA`. `PAPERBRIQ_ALLOW_INSECURE_TLS=1` is for temporary diagnosis only and must not be used for an internet-connected machine controller.
 

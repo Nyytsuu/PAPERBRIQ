@@ -18,9 +18,12 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
 import android.os.SystemClock;
+import android.text.method.PasswordTransformationMethod;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -38,6 +41,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions;
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
 import com.paperbriq.app.data.ApiClient;
 import com.paperbriq.app.data.AppSession;
+import com.paperbriq.app.data.MachineKeyStore;
 import com.paperbriq.app.ui.AppShell;
 import com.paperbriq.app.ui.LoginScreen;
 import com.paperbriq.app.ui.Ui;
@@ -63,6 +67,7 @@ public class AppController {
     private static final long LIVE_UPDATE_MS = 5000L;
     private static final long MACHINE_CHECK_VALID_MS = 5 * 60 * 1000L;
     private static final String DEVICE_ID = "paperbriq-esp32";
+    private static final String DEVICE_STATUS = "/api/device/control-status?deviceId=" + DEVICE_ID;
     private static final String EVENT_CHANNEL_ID = "paperbriq_machine_events";
     private static final String ERROR_CHANNEL_ID = "paperbriq_machine_errors";
 
@@ -72,9 +77,9 @@ public class AppController {
     private final AppSession session = new AppSession();
     private final Ui ui;
     private final SharedPreferences preferences;
+    private final MachineKeyStore machineKeyStore;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Set<String> seenDeviceEventIds = new HashSet<>();
-    private String controlKey = "";
     private boolean deviceEventsInitialized = false;
     private boolean commandSubmitting = false;
     private boolean machineCheckRunning = false;
@@ -99,6 +104,7 @@ public class AppController {
         this.apiClient = new ApiClient();
         this.ui = new Ui(activity);
         this.preferences = activity.getSharedPreferences(PREFS_NAME, Activity.MODE_PRIVATE);
+        this.machineKeyStore = new MachineKeyStore(activity);
         createNotificationChannels();
     }
 
@@ -175,7 +181,7 @@ public class AppController {
                 {
                     try {
                         controlRequestedAt = SystemClock.elapsedRealtime();
-                        controlStatus = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                        controlStatus = getMachineControlStatus();
                     } catch (Exception controlError) {
                         controlStatus = new JSONObject();
                         controlStatus.put("enabled", false);
@@ -235,8 +241,6 @@ public class AppController {
                 return "/api/rewards";
             case "reports":
                 return "/api/reports";
-            case "history":
-                return "/api/history";
             case "scan":
                 return "/api/qr-scans";
             case "settings":
@@ -264,7 +268,7 @@ public class AppController {
                 if (role != null && !role.trim().isEmpty()) {
                     payload.put("role", role);
                 }
-                JSONObject response = apiClient.postJson("/api/auth/login", payload);
+                JSONObject response = apiClient.login(payload, machineKeyStore.read(apiClient.machineKeyOrigin()));
                 session.user = response.optJSONObject("user");
                 session.summary = response.optJSONObject("summary");
                 if (keepLoggedIn) {
@@ -290,7 +294,7 @@ public class AppController {
     public void logout() {
         clearSavedSession();
         session.clear();
-        controlKey = "";
+        executor.execute(apiClient.endOperatorSession());
         seenDeviceEventIds.clear();
         clearMachineCheck();
         machineChecks = null;
@@ -426,8 +430,18 @@ public class AppController {
         return "admin".equals(role) || "barangay_staff".equals(role);
     }
 
-    public boolean hasControlKey() {
-        return !controlKey.trim().isEmpty();
+    public boolean hasMachineAccess() {
+        return apiClient.hasOperatorSession() &&
+            session.pagePayload("deviceControl").optBoolean("operatorAuthorized");
+    }
+
+    public boolean isDemoAdmin() {
+        JSONObject user = session.user;
+        return user != null && "demo-admin".equals(user.optString("id")) && "admin".equals(user.optString("role"));
+    }
+
+    private JSONObject getMachineControlStatus() throws Exception {
+        return apiClient.getJson(DEVICE_STATUS);
     }
 
     private void acceptMachineChecks(JSONObject control, long requestedAt) {
@@ -456,7 +470,7 @@ public class AppController {
         executor.execute(() -> {
             long requestedAt = SystemClock.elapsedRealtime();
             try {
-                JSONObject control = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                JSONObject control = getMachineControlStatus();
                 activity.runOnUiThread(() -> {
                     machineCheckRunning = false;
                     acceptMachineChecks(control, requestedAt);
@@ -485,34 +499,131 @@ public class AppController {
         machineCheckConfirmedAt = 0;
     }
 
-    public void showControlKeyDialog(Runnable afterSaved) {
-        EditText input = ui.editText("Operator control key", true);
-        input.setText(controlKey);
+    public void signInForMachineAccess() {
+        if (isDemoAdmin()) {
+            JSONObject status = session.pagePayload("deviceControl");
+            if (apiClient.hasOperatorSession()) {
+                showDemoMachineSession();
+            } else if (status.has("enabled") && !status.optBoolean("temporaryMachineKeysSupported")) {
+                showInfoDialog("Backend update needed",
+                    "Render is running a version that does not issue temporary machine keys. Deploy the updated PaperBriq backend, then sign out and back in.");
+            } else if (machineKeyStore.hasSavedApproval()) {
+                new AlertDialog.Builder(activity)
+                    .setTitle("Temporary key unavailable")
+                    .setMessage("This phone has saved approval, but the server did not issue a temporary key for this sign-in. Sign in again, or recheck the phone approval if the Render key changed.")
+                    .setPositiveButton("Sign in again", (dialog, which) -> logout())
+                    .setNeutralButton("Check approval", (dialog, which) -> showDemoMachineKeyDialog())
+                    .setNegativeButton("Close", null)
+                    .show();
+            } else {
+                showDemoMachineKeyDialog();
+            }
+            return;
+        }
+        confirmAction("Sign in again?", "Use an approved operator account to control PaperBriq.", this::logout);
+    }
 
+    private void showDemoMachineSession() {
+        String key = apiClient.temporaryMachineKey();
+        LinearLayout details = ui.column();
+        details.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(12));
+        CheckBox showKey = new CheckBox(activity);
+        showKey.setText("Show temporary key");
+        TextView keyText = ui.text(key, 14, AppColors.INK, Typeface.NORMAL);
+        keyText.setTypeface(Typeface.MONOSPACE);
+        keyText.setVisibility(View.GONE);
+        showKey.setOnCheckedChangeListener((view, checked) -> keyText.setVisibility(checked ? View.VISIBLE : View.GONE));
+        details.addView(showKey, ui.matchWrap());
+        details.addView(keyText, ui.matchWrap());
         AlertDialog dialog = new AlertDialog.Builder(activity)
-            .setTitle("Machine access setup")
-            .setMessage("Ask the machine administrator for the control key. Administrators can find it as CONTROL_API_KEY in Render. The key stays hidden and is kept only until this app closes or you log out.")
-            .setView(input)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Use key", null)
+            .setTitle(hasMachineAccess() ? "Machine access active" : "Temporary machine key")
+            .setMessage("PaperBriq generates a new temporary key each time you sign in on this approved phone.")
+            .setView(details)
+            .setNeutralButton("Forget phone", (ignored, which) -> {
+                machineKeyStore.clear();
+                logout();
+            })
+            .setPositiveButton("Close", null)
             .create();
+        dialog.show();
+        if (dialog.getWindow() != null) dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+    }
 
-        dialog.setOnShowListener(openDialog -> {
+    private void showDemoMachineKeyDialog() {
+        EditText input = ui.editText("Phone approval key", true);
+        CheckBox showKey = new CheckBox(activity);
+        showKey.setText("Show key");
+        showKey.setOnCheckedChangeListener((view, checked) -> {
+            input.setTransformationMethod(checked ? null : PasswordTransformationMethod.getInstance());
+            input.setSelection(input.length());
+        });
+        LinearLayout form = ui.column();
+        form.setPadding(ui.dp(20), 0, ui.dp(20), 0);
+        form.addView(input, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+        form.addView(showKey, ui.matchWrap());
+        AlertDialog dialog = new AlertDialog.Builder(activity)
+            .setTitle("Machine access")
+            .setMessage("Approve this phone once with the CONTROL_API_KEY from Render. Then sign in to get a temporary machine key.")
+            .setView(form)
+            .setPositiveButton("Save key", null)
+            .setNeutralButton("Forget key", (ignored, which) -> {
+                machineKeyStore.clear();
+                logout();
+            })
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnShowListener(ignored -> {
             styleDialogButtons(dialog);
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-                String nextKey = input.getText().toString().trim();
-                if (nextKey.isEmpty()) {
-                    input.setError("Control key is required");
+            Button save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            save.setOnClickListener(view -> {
+                String key = input.getText().toString().trim();
+                if (key.isEmpty()) {
+                    input.setError("Enter the machine key.");
                     return;
                 }
-                controlKey = nextKey;
-                dialog.dismiss();
-                Toast.makeText(activity, "Control key ready for this session.", Toast.LENGTH_SHORT).show();
-                if (afterSaved != null) afterSaved.run();
-                if ("process".equals(session.currentPage)) renderPage("process", true);
+                if (key.chars().anyMatch(character -> character < 32 || character == 127)) {
+                    input.setError("Enter the machine key on one line.");
+                    return;
+                }
+                save.setEnabled(false);
+                showKey.setChecked(false);
+                showKey.setEnabled(false);
+                dialog.setCancelable(false);
+                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
+                executor.execute(() -> {
+                    try {
+                        JSONObject status = apiClient.getMachineKeyStatus(DEVICE_STATUS, key);
+                        if (!status.optBoolean("temporaryMachineKeysSupported")) {
+                            throw new IllegalStateException("Deploy the updated backend before saving the machine key.");
+                        }
+                        if (!status.optBoolean("enabled")) {
+                            throw new IllegalStateException("Enable remote control and set CONTROL_API_KEY on Render.");
+                        }
+                        if (!status.optBoolean("machineKeyAuthorized")) {
+                            throw new IllegalStateException("The machine key did not match Render.");
+                        }
+                        machineKeyStore.save(apiClient.machineKeyOrigin(), key);
+                        activity.runOnUiThread(() -> {
+                            if (!isDemoAdmin()) return;
+                            dialog.dismiss();
+                            confirmAction("Phone approved", "Sign in again to activate your temporary machine key.", this::logout);
+                        });
+                    } catch (Exception error) {
+                        activity.runOnUiThread(() -> {
+                            input.setError(error.getMessage());
+                            showKey.setEnabled(true);
+                            save.setEnabled(true);
+                            dialog.setCancelable(true);
+                            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
+                            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(true);
+                        });
+                    }
+                });
             });
         });
         dialog.show();
+        if (dialog.getWindow() != null) dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
     }
 
     public void sendDeviceCommand(String command) {
@@ -526,23 +637,19 @@ public class AppController {
     }
 
     public void saveProductionSeconds(String action, int seconds) {
-        if (!canControlMachine() || !("pump".equals(action) || "drying".equals(action))
+        if (!canControlMachine() || !"drying".equals(action)
                 || seconds < 0 || seconds > Integer.MAX_VALUE / 1000) return;
-        if (!hasControlKey()) { showControlKeyDialog(() -> saveProductionSeconds(action, seconds)); return; }
+        if (!hasMachineAccess()) { signInForMachineAccess(); return; }
         executor.execute(() -> {
             try {
-                JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                JSONObject latest = getMachineControlStatus();
                 JSONObject controls = latest.optJSONObject("productionControls");
                 JSONObject previous = controls == null ? null : controls.optJSONObject("settings");
                 if (previous == null) throw new IllegalStateException("Update the server before saving process settings.");
                 JSONObject body = new JSONObject();
                 body.put("deviceId", DEVICE_ID);
-                for (String key : new String[]{"pump", "drying"}) {
-                    int n = key.equals(action) ? seconds : previous.optInt(key + "Seconds", 0);
-                    body.put(key + "Seconds", n > 0 ? n : JSONObject.NULL);
-                }
-                Map<String,String> headers = new HashMap<>(); headers.put("X-Control-Key", controlKey);
-                apiClient.postJson("/api/device/production-settings", body, headers);
+                body.put("dryingSeconds", seconds > 0 ? seconds : JSONObject.NULL);
+                apiClient.postOperatorJson("/api/device/production-settings", body, java.util.Collections.emptyMap());
                 activity.runOnUiThread(() -> {
                     Toast.makeText(activity, "Process time saved. Use the action button to apply it to the machine.", Toast.LENGTH_LONG).show();
                     loadPagePayload("process", true);
@@ -564,7 +671,7 @@ public class AppController {
     private void sendDeviceCommand(String command, int durationSeconds, String runId) {
         String normalized = String.valueOf(command).trim().toLowerCase(Locale.ROOT);
         boolean production = "pump_arm".equals(normalized) || "drying_start".equals(normalized)
-            || "pump_time".equals(normalized) || "drying_time".equals(normalized);
+            || "drying_time".equals(normalized) || "preheat_start".equals(normalized);
         boolean timed = "heater".equals(normalized) || "pump".equals(normalized);
         if (timed && (durationSeconds < 1 || durationSeconds > ("heater".equals(normalized) ? 10 : 3))) {
             Toast.makeText(activity, "Choose heater 1–10 seconds or pump 1–3 seconds.", Toast.LENGTH_LONG).show(); return;
@@ -581,8 +688,8 @@ public class AppController {
             Toast.makeText(activity, "Use Check machine and resolve failed connection or sensor checks before starting.", Toast.LENGTH_LONG).show();
             return;
         }
-        if (!hasControlKey()) {
-            showControlKeyDialog(() -> sendDeviceCommand(normalized, durationSeconds, runId));
+        if (!hasMachineAccess()) {
+            signInForMachineAccess();
             return;
         }
         if (commandSubmitting) {
@@ -594,7 +701,7 @@ public class AppController {
         executor.execute(() -> {
             try {
                 if (timed) {
-                    JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                    JSONObject latest = getMachineControlStatus();
                     JSONObject controls = latest.optJSONObject("timedControls");
                     JSONObject output = controls == null ? null : controls.optJSONObject(normalized);
                     if (!latest.optBoolean("enabled", false) || output == null || !output.optBoolean("available", false)) {
@@ -603,7 +710,7 @@ public class AppController {
                     }
                 }
                 if ("start".equals(normalized) || "self_test".equals(normalized)) {
-                    JSONObject latest = apiClient.getJson("/api/device/control-status?deviceId=" + DEVICE_ID);
+                    JSONObject latest = getMachineControlStatus();
                     JSONObject checks = latest.optJSONObject("machineChecks");
                     if (!latest.optBoolean("enabled", false) || checks == null || !checks.optBoolean("passed", false)
                         || checks.optLong("validForMs", 0) <= 0
@@ -618,7 +725,7 @@ public class AppController {
                 JSONObject payload = new JSONObject();
                 payload.put("deviceId", DEVICE_ID);
                 payload.put("command", normalized);
-                if (production) { payload.put("durationSeconds", durationSeconds); payload.put("runId", runId); }
+                if (production && !"pump_arm".equals(normalized)) { payload.put("durationSeconds", durationSeconds); payload.put("runId", runId); }
                 if (timed) { payload.put("durationSeconds", durationSeconds); payload.put("supervised", true); }
                 if ("self_test".equals(normalized)) payload.put("unloadedSupervised", true);
                 payload.put("source", "android");
@@ -626,16 +733,15 @@ public class AppController {
                     payload.put("issuedBy", session.user.optString("email", session.user.optString("fullName", "android-operator")));
                 }
                 Map<String, String> headers = new HashMap<>();
-                headers.put("X-Control-Key", controlKey);
                 headers.put("Idempotency-Key", java.util.UUID.randomUUID().toString());
-                JSONObject response = apiClient.postJson("/api/device/commands", payload, headers);
+                JSONObject response = apiClient.postOperatorJson("/api/device/commands", payload, headers);
                 JSONObject queued = response.optJSONObject("command");
                 String status = queued != null ? queued.optString("status", "pending") : "pending";
                 activity.runOnUiThread(() -> {
                     commandSubmitting = false;
                     clearMachineCheck();
                     String label = "stop".equals(normalized) ? "Software Stop" : "self_test".equals(normalized) ? "Component tests"
-                        : "pump_arm".equals(normalized) ? "Pump cycle" : "drying_start".equals(normalized) ? "Drying"
+                        : "pump_arm".equals(normalized) ? "Pump cycle" : "drying_start".equals(normalized) ? "Drying" : "preheat_start".equals(normalized) ? "Preheating"
                         : normalized.endsWith("_time") ? "Time change" : capitalize(normalized);
                     Toast.makeText(activity, label + " queued (" + status + "). Waiting for the device acknowledgement.", Toast.LENGTH_LONG).show();
                     loadPagePayload("process", true);

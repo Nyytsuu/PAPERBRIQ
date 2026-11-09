@@ -26,7 +26,16 @@ function AppRoutes() {
     navigate(getDefaultRoute(user), { replace: true });
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+    } catch {
+      // Local logout still works offline; server sessions have a fixed expiration.
+    }
     setCurrentUser(null);
     setSummary(null);
     clearStoredSession();
@@ -60,7 +69,8 @@ function AppRoutes() {
       >
         <Route path="/monitoring" element={<RolePage user={currentUser} roles={["admin", "barangay_staff"]}><OverviewPage /></RolePage>} />
         <Route path="/monitoring/telemetry" element={<RolePage user={currentUser} roles={["admin", "barangay_staff"]}><IotPage /></RolePage>} />
-        <Route path="/monitoring/history" element={<RolePage user={currentUser} roles={["admin", "barangay_staff"]}><ReportsPage /></RolePage>} />
+        <Route path="/monitoring/reports" element={<RolePage user={currentUser} roles={["admin", "barangay_staff"]}><ReportsPage /></RolePage>} />
+        <Route path="/monitoring/history" element={<Navigate to="/monitoring/reports" replace />} />
       </Route>
 
       <Route path="*" element={<Navigate to={currentUser ? getDefaultRoute(currentUser) : "/signin"} replace />} />
@@ -84,6 +94,7 @@ function readStoredValue(key) {
 }
 
 function clearStoredSession() {
+  sessionStorage.removeItem("paperbriqControlKey");
   sessionStorage.removeItem("paperbriqUser");
   sessionStorage.removeItem("paperbriqSummary");
   localStorage.removeItem("paperbriqUser");

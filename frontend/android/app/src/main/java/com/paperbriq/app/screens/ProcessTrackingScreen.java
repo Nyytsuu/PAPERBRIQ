@@ -5,11 +5,12 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.NumberPicker;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -19,6 +20,8 @@ import com.paperbriq.app.ui.Ui;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+
+import java.util.Locale;
 
 public class ProcessTrackingScreen implements AppScreen {
     @Override
@@ -76,7 +79,7 @@ public class ProcessTrackingScreen implements AppScreen {
         JSONObject checks = controller.session().pagePayload("deviceControl").optJSONObject("machineChecks");
         JSONObject chamber = checks == null ? null : checks.optJSONObject("chamber");
         root.addView(ui.infoListCard("Drying chamber", new String[][]{
-            {"Automatic drying", "Not enabled"},
+            {"Drying start", "Separate start after loading"},
             {"Fan", reportedBoolean(chamber, "fanOn", "On command", "Off command")},
             {"Unlock power", reportedBoolean(chamber, "unlockOn", "On", "Off")},
             {"Door contact", reportedBoolean(chamber, "doorClosed", "Closed", "Open")}
@@ -103,60 +106,106 @@ public class ProcessTrackingScreen implements AppScreen {
 
     private void addProductionSettings(LinearLayout root, AppController controller, Ui ui) {
         JSONObject status = controller.session().pagePayload("deviceControl");
+        boolean machineAccess = controller.hasMachineAccess();
         JSONObject controls = status.optJSONObject("productionControls");
         JSONObject run = controls == null ? null : controls.optJSONObject("run");
         LinearLayout card = ui.card(18);
         card.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
-        card.addView(ui.text("Pump & drying", 19, AppColors.INK, Typeface.BOLD));
-        card.addView(ui.text("Set the total time, then apply it to the machine", 12, AppColors.MUTED, Typeface.NORMAL));
-        for (String action : new String[]{"pump", "drying"}) {
-            String label = "pump".equals(action) ? "Pump time" : "Drying time";
-            LinearLayout row = ui.row();
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            LinearLayout description = ui.column();
-            description.addView(ui.text(label, 15, AppColors.INK, Typeface.BOLD));
-            TextView duration = ui.text(durationLabel(controller.productionSeconds(action)), 18, AppColors.GREEN_DARK, Typeface.BOLD);
-            description.addView(duration);
-            row.addView(description, new LinearLayout.LayoutParams(0, -2, 1));
-            Button edit = ui.outlineButton("Set time");
-            edit.setContentDescription("Set " + label.toLowerCase());
-            edit.setOnClickListener(v -> editProductionDuration(controller, ui, action, label));
-            row.addView(edit, new LinearLayout.LayoutParams(ui.dp(108), ui.dp(48)));
-            card.addView(row, ui.fullWidth(-2, 0, ui.dp(16), 0, 0));
-            JSONObject output = controls == null ? null : controls.optJSONObject(action);
-            boolean ownRun = controls != null && controls.optBoolean("active") && run != null && action.equals(run.optString("output"));
-            int maximum = output == null ? 0 : output.optInt("maxSeconds");
-            card.addView(ui.text(maximum > 0 ? "Maximum: " + durationLabel(maximum) : "Maximum time awaiting commissioning", 12, AppColors.MUTED, Typeface.NORMAL));
-            if (run != null && action.equals(run.optString("output"))) {
-                String state = run.optString("state", "unknown").replace('_', ' ');
-                int remaining = run.optInt("remainingSeconds");
-                card.addView(ui.text("Controller: " + state + " • remaining " + (remaining == 0 ? "0 sec" : durationLabel(remaining)), 13, AppColors.INK, Typeface.BOLD));
-                card.addView(ui.text("Applied total: " + durationLabel(run.optInt("totalSeconds")) + " • last machine report", 12, AppColors.MUTED, Typeface.NORMAL));
-            }
-            String command = ownRun ? action + "_time" : "pump".equals(action) ? "pump_arm" : "drying_start";
-            Button apply = ui.greenButton(ownRun ? "Apply total time" : "pump".equals(action) ? "Enable pump for next batch" : "Start drying");
-            boolean available = status.optBoolean("enabled") && output != null && output.optBoolean(ownRun ? "canAdjust" : "canStart")
-                && controller.productionSeconds(action) > 0 && controller.productionSeconds(action) <= maximum;
-            apply.setEnabled(available); apply.setAlpha(available ? 1f : 0.45f);
-            apply.setOnClickListener(v -> controller.confirmAction(ownRun ? "Change this run's total time?" : "pump".equals(action) ? "Enable the pump for the next batch?" : "Start drying?",
-                ownRun ? "Elapsed time is kept. A total shorter than elapsed time stops the output. Wait for the controller to confirm the change."
-                : "pump".equals(action) ? "After enabling, use Reset and Start forming. Paper detection during mixing starts one timed water run."
-                : "Load the drying chamber, close the door and keep the heater fan and thermostat operating.",
-                () -> controller.sendProductionCommand(command, controller.productionSeconds(action), ownRun ? run.optString("id") : "")));
-            card.addView(apply, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
-            if (!available) card.addView(ui.text(output == null ? "Update and reconnect the machine boards and server."
-                : !output.optString("reason").isEmpty() ? output.optString("reason")
-                : controller.productionSeconds(action) <= 0 ? "Set a duration first." : controller.productionSeconds(action) > maximum ? "Choose a time within the operating limit." : "Waiting for machine controls.",
-                12, AppColors.MUTED, Typeface.NORMAL));
+        card.addView(ui.text("Water and drying", 19, AppColors.INK, Typeface.BOLD));
+        JSONObject thermal = controls == null ? null : controls.optJSONObject("thermal");
+        JSONObject preheat = controls == null ? null : controls.optJSONObject("preheat");
+        int target = thermal == null ? 0 : thermal.optInt("targetC");
+        int preheatLimit = preheat == null ? 0 : preheat.optInt("maxSeconds");
+        card.addView(ui.text("Preheat chamber", 17, AppColors.INK, Typeface.BOLD),
+            ui.fullWidth(-2, 0, ui.dp(16), 0, ui.dp(6)));
+        card.addView(ui.text(target > 0 ? "Set the physical thermostat to " + target + " °C. Preheating and holding stop after "
+            + durationLabel(preheatLimit) + " in total." : "Update both boards to use preheating.",
+            12, AppColors.MUTED, Typeface.NORMAL));
+        boolean preheating = run != null && "preheat".equals(run.optString("output")) && controls.optBoolean("active");
+        if (preheating) card.addView(ui.text("ready_to_load".equals(run.optString("state")) ?
+            "Last report: ready to load" : "Preheating — waiting for temperature",
+            15, AppColors.GREEN_DARK, Typeface.BOLD));
+        if (preheating) card.addView(ui.text("Preheat time remaining: " + run.optInt("remainingSeconds") + " sec",
+            12, AppColors.MUTED, Typeface.NORMAL));
+        Button preheatButton = ui.greenButton("Start preheat");
+        boolean preheatAvailable = machineAccess && preheat != null && preheat.optBoolean("canStart") && preheatLimit > 0;
+        preheatButton.setEnabled(preheatAvailable); preheatButton.setAlpha(preheatAvailable ? 1f : 0.45f);
+        preheatButton.setOnClickListener(v -> controller.confirmAction("Preheat the empty chamber?",
+            "Close the door, keep the heater fan running, and set the thermostat to " + target
+                + " °C. Heating stops after " + durationLabel(preheatLimit) + ". Forming cannot run during preheating.",
+            () -> controller.sendProductionCommand("preheat_start", preheatLimit, "")));
+        card.addView(preheatButton, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+        if (preheating && machineAccess) {
+            Button stopPreheat = ui.outlineButton("Stop preheat to load");
+            stopPreheat.setTextColor(AppColors.RED);
+            stopPreheat.setOnClickListener(v -> controller.sendDeviceCommand("stop"));
+            card.addView(stopPreheat, ui.fullWidth(ui.dp(48), 0, ui.dp(8), 0, 0));
         }
-        card.addView(ui.text("Pump trigger: paper entering the mixer", 13, AppColors.INK, Typeface.BOLD),
+        if (!preheatAvailable && !preheating) card.addView(ui.text(preheat == null ? "Waiting for machine controls."
+            : preheat.optString("reason", "Waiting for machine controls."), 12, AppColors.MUTED, Typeface.NORMAL));
+        card.addView(ui.text("Preheat while forming is stopped. Press Stop, load briquettes, close the door, then Start drying. The drying countdown begins after the chamber reaches temperature. Opening the door cancels heating; closing it does not restart it.",
+            12, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, ui.dp(8), 0, 0));
+        JSONObject pump = controls == null ? null : controls.optJSONObject("pump");
+        Button enablePump = ui.greenButton("Enable preset pump for next batch");
+        boolean pumpAvailable = machineAccess && pump != null && pump.optBoolean("canStart");
+        enablePump.setEnabled(pumpAvailable);
+        enablePump.setAlpha(pumpAvailable ? 1f : 0.45f);
+        enablePump.setOnClickListener(v -> controller.confirmAction("Enable the preset pump?",
+            "After enabling, use Reset and Start forming. Wait for Ready for paper before feeding.",
+            () -> controller.sendProductionCommand("pump_arm", 0, "")));
+        card.addView(enablePump, ui.fullWidth(ui.dp(52), 0, ui.dp(12), 0, 0));
+        if (!pumpAvailable && pump != null && !pump.optString("reason").isEmpty()) {
+            card.addView(ui.text(pump.optString("reason"), 12, AppColors.MUTED, Typeface.NORMAL));
+        }
+        String action = "drying";
+        String label = "Drying time";
+        LinearLayout row = ui.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout description = ui.column();
+        description.addView(ui.text(label, 15, AppColors.INK, Typeface.BOLD));
+        TextView duration = ui.text(durationLabel(controller.productionSeconds(action)), 18, AppColors.GREEN_DARK, Typeface.BOLD);
+        description.addView(duration);
+        row.addView(description, new LinearLayout.LayoutParams(0, -2, 1));
+        Button edit = ui.outlineButton("Set time");
+        edit.setEnabled(machineAccess);
+        edit.setContentDescription("Set " + label.toLowerCase());
+        edit.setOnClickListener(v -> editProductionDuration(controller, ui, action, label));
+        row.addView(edit, new LinearLayout.LayoutParams(ui.dp(108), ui.dp(48)));
+        card.addView(row, ui.fullWidth(-2, 0, ui.dp(16), 0, 0));
+        JSONObject output = controls == null ? null : controls.optJSONObject(action);
+        boolean ownRun = controls != null && controls.optBoolean("active") && run != null && action.equals(run.optString("output"));
+        int maximum = output == null ? 0 : output.optInt("maxSeconds");
+        card.addView(ui.text(maximum > 0 ? "Maximum: " + durationLabel(maximum) : "Maximum time awaiting commissioning", 12, AppColors.MUTED, Typeface.NORMAL));
+        if (run != null && action.equals(run.optString("output"))) {
+            String state = run.optString("state", "unknown").replace('_', ' ');
+            int remaining = run.optInt("remainingSeconds");
+            card.addView(ui.text("warming".equals(state)
+                ? "Warming to target — drying countdown has not started"
+                : "Controller: " + state + " • remaining " + (remaining == 0 ? "0 sec" : durationLabel(remaining)), 13, AppColors.INK, Typeface.BOLD));
+            card.addView(ui.text("Applied total: " + durationLabel(run.optInt("totalSeconds")) + " • last machine report", 12, AppColors.MUTED, Typeface.NORMAL));
+        }
+        String command = ownRun ? "drying_time" : "drying_start";
+        Button apply = ui.greenButton(ownRun ? "Apply total time" : "Start drying");
+        boolean available = machineAccess && output != null && output.optBoolean(ownRun ? "canAdjust" : "canStart")
+            && controller.productionSeconds(action) > 0 && controller.productionSeconds(action) <= maximum;
+        apply.setEnabled(available); apply.setAlpha(available ? 1f : 0.45f);
+        apply.setOnClickListener(v -> controller.confirmAction(ownRun ? "Change this run's total time?" : "Start drying?",
+            ownRun ? "Elapsed time is kept. A total shorter than elapsed time stops the output. Wait for the controller to confirm the change."
+            : "Load the chamber, close the door and keep the heater fan operating. Set the thermostat to " + target + " °C. The drying timer starts once temperature is reached; warm-up is limited to 10 minutes.",
+            () -> controller.sendProductionCommand(command, controller.productionSeconds(action), ownRun ? run.optString("id") : "")));
+        card.addView(apply, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+        if (!available) card.addView(ui.text(output == null ? "Update and reconnect the machine boards and server."
+            : !output.optString("reason").isEmpty() ? output.optString("reason")
+            : controller.productionSeconds(action) <= 0 ? "Set a duration first." : controller.productionSeconds(action) > maximum ? "Choose a time within the operating limit." : "Waiting for machine controls.",
+            12, AppColors.MUTED, Typeface.NORMAL));
+        card.addView(ui.text("Pump trigger: paper entering the shredder", 13, AppColors.INK, Typeface.BOLD),
             ui.fullWidth(-2, 0, ui.dp(16), 0, ui.dp(6)));
         card.addView(ui.text("Drying needs a separate start after loading the chamber. The paper sensor does not start the heater.", 12, AppColors.MUTED, Typeface.NORMAL),
             ui.fullWidth(-2, 0, 0, 0, ui.dp(6)));
         card.addView(ui.text("Temperature is set on the digital thermostat.", 12, AppColors.MUTED, Typeface.NORMAL));
         Button stop = ui.outlineButton("Stop"); stop.setTextColor(AppColors.RED);
         JSONObject device = status.optJSONObject("device");
-        stop.setEnabled(status.optBoolean("enabled") && device != null && device.optBoolean("connected"));
+        stop.setEnabled(machineAccess && device != null && device.optBoolean("connected"));
         stop.setOnClickListener(v -> controller.sendDeviceCommand("stop"));
         card.addView(stop, ui.fullWidth(ui.dp(48), 0, ui.dp(12), 0, 0));
         root.addView(card, ui.fullWidth(-2, 0, ui.dp(12), 0, ui.dp(12)));
@@ -164,50 +213,156 @@ public class ProcessTrackingScreen implements AppScreen {
 
     private String durationLabel(int seconds) {
         if (seconds <= 0) return "Not set";
-        int minutes = seconds / 60, remainder = seconds % 60;
-        return minutes == 0 ? remainder + " sec" : minutes + " min" + (remainder == 0 ? "" : " " + remainder + " sec");
+        int hours = seconds / 3600, minutes = (seconds % 3600) / 60, remainder = seconds % 60;
+        String label = hours > 0 ? hours + " hr" : "";
+        if (minutes > 0) label += (label.isEmpty() ? "" : " ") + minutes + " min";
+        if (remainder > 0) label += (label.isEmpty() ? "" : " ") + remainder + " sec";
+        return label;
     }
 
     private void editProductionDuration(AppController controller, Ui ui, String action, String label) {
-        LinearLayout content = ui.column();
-        content.setPadding(ui.dp(20), ui.dp(12), ui.dp(20), ui.dp(8));
-        content.addView(ui.text("Save the total duration. Use Apply total time to change an active run; elapsed time will be kept.", 13, AppColors.MUTED, Typeface.NORMAL));
-        EditText minutes = ui.editText("Minutes", false);
-        EditText seconds = ui.editText("Seconds (0–59)", false);
-        minutes.setInputType(InputType.TYPE_CLASS_NUMBER);
-        seconds.setInputType(InputType.TYPE_CLASS_NUMBER);
-        minutes.setContentDescription("Minutes"); seconds.setContentDescription("Seconds");
+        int maximum = productionMaximum(controller, action);
+        if (maximum <= 0) {
+            new AlertDialog.Builder(controller.activity()).setTitle(label)
+                .setMessage("A maximum time must be configured on the machine before choosing a drying duration. If setup is complete, reconnect and wait for the machine's latest report.")
+                .setPositiveButton("Close", null).show();
+            return;
+        }
+        int pickerMaximum = Math.min(maximum, Integer.MAX_VALUE / 1000);
         int saved = controller.productionSeconds(action);
-        if (saved > 0) { minutes.setText(String.valueOf(saved / 60)); seconds.setText(String.valueOf(saved % 60)); }
-        content.addView(minutes, ui.fullWidth(ui.dp(52), 0, ui.dp(12), 0, 0));
-        content.addView(seconds, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
-        AlertDialog dialog = new AlertDialog.Builder(controller.activity()).setTitle(label).setView(content)
+        int initial = Math.max(0, Math.min(saved, pickerMaximum));
+        LinearLayout content = ui.column();
+        content.setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(8));
+        TextView preview = ui.text("", 30, AppColors.GREEN_DARK, Typeface.BOLD);
+        preview.setGravity(Gravity.CENTER);
+        content.addView(preview, ui.fullWidth(-2, 0, 0, 0, ui.dp(8)));
+        TextView hint = ui.text("Scroll to choose how long it runs", 13, AppColors.MUTED, Typeface.NORMAL);
+        hint.setGravity(Gravity.CENTER);
+        content.addView(hint);
+
+        LinearLayout wheels = ui.row();
+        NumberPicker hours = addDurationWheel(controller, ui, wheels, "Hours", pickerMaximum / 3600);
+        NumberPicker minutes = addDurationWheel(controller, ui, wheels, "Minutes", 59);
+        NumberPicker seconds = addDurationWheel(controller, ui, wheels, "Seconds", 59);
+        NumberPicker[] pickers = {hours, minutes, seconds};
+        hours.setValue(initial / 3600);
+        minutes.setValue((initial % 3600) / 60);
+        seconds.setValue(initial % 60);
+        content.addView(wheels, ui.fullWidth(-2, 0, ui.dp(12), 0, ui.dp(8)));
+
+        LinearLayout shortcuts = ui.row();
+        int[] increments = {10, 60, 300};
+        Button[] addButtons = new Button[increments.length];
+        String[] addLabels = {"+10 sec", "+1 min", "+5 min"};
+        for (int i = 0; i < increments.length; i++) {
+            Button button = ui.outlineButton(addLabels[i]);
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
+            button.setPadding(ui.dp(2), ui.dp(4), ui.dp(2), ui.dp(4));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ui.dp(48), 1);
+            if (i > 0) params.setMarginStart(ui.dp(6));
+            shortcuts.addView(button, params);
+            addButtons[i] = button;
+        }
+        content.addView(shortcuts);
+        content.addView(ui.text(maximum > 0 ? "Maximum: " + durationLabel(maximum)
+            : "The machine's maximum time has not been set yet.", 12, AppColors.MUTED, Typeface.NORMAL),
+            ui.fullWidth(-2, 0, ui.dp(12), 0, ui.dp(6)));
+        content.addView(ui.text("Saving does not start the machine. For a running cycle, use Apply total time after saving; elapsed time is kept.",
+            12, AppColors.MUTED, Typeface.NORMAL));
+        TextView error = ui.text(saved > pickerMaximum ? "Saved time exceeds the limit. Choose a shorter time." : "",
+            13, AppColors.RED, Typeface.NORMAL);
+        error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        content.addView(error, ui.fullWidth(-2, 0, ui.dp(8), 0, 0));
+        ScrollView scroll = new ScrollView(controller.activity());
+        scroll.addView(content, ui.matchWrap());
+        AlertDialog dialog = new AlertDialog.Builder(controller.activity()).setTitle(label).setView(scroll)
             .setNegativeButton("Cancel", null).setNeutralButton("Clear", (d, which) -> {
                 controller.saveProductionSeconds(action, 0);
             }).setPositiveButton("Save time", null).create();
-        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            try {
-                String m = minutes.getText().toString().trim(), s = seconds.getText().toString().trim();
-                if ((!m.isEmpty() && !m.matches("[0-9]+")) || (!s.isEmpty() && !s.matches("[0-9]+"))) throw new NumberFormatException();
-                long mins = m.isEmpty() ? 0 : Long.parseLong(m), secs = s.isEmpty() ? 0 : Long.parseLong(s);
-                if (secs > 59) { seconds.setError("Use 0–59 seconds"); return; }
-                // Storage arithmetic bound only; not a commissioned operating limit.
-                if (mins > Integer.MAX_VALUE / 60000L) { minutes.setError("Duration is too large"); return; }
-                long total = mins * 60 + secs;
-                if (total < 1 || total > Integer.MAX_VALUE / 1000) { seconds.setError("Enter a valid duration above zero"); return; }
-                JSONObject controls = controller.session().pagePayload("deviceControl").optJSONObject("productionControls");
-                JSONObject output = controls == null ? null : controls.optJSONObject(action);
-                int max = output == null ? 0 : output.optInt("maxSeconds");
-                if (max > 0 && total > max) { seconds.setError("Maximum " + durationLabel(max)); return; }
-                controller.saveProductionSeconds(action, (int) total); dialog.dismiss();
-            } catch (NumberFormatException error) { seconds.setError("Enter whole minutes and seconds"); }
-        }));
+        boolean[] scrolling = new boolean[pickers.length];
+        Runnable refresh = () -> {
+            // Constrain the smaller units at the limit, including limits such as 1 min 30 sec.
+            minutes.setMaxValue(Math.min(59, (pickerMaximum - hours.getValue() * 3600) / 60));
+            seconds.setMaxValue(Math.min(59, pickerMaximum - hours.getValue() * 3600 - minutes.getValue() * 60));
+            int total = durationSeconds(hours, minutes, seconds);
+            preview.setText(String.format(Locale.getDefault(), "%02d : %02d : %02d", hours.getValue(), minutes.getValue(), seconds.getValue()));
+            preview.setContentDescription("Total duration: " + (total == 0 ? "zero seconds" : durationLabel(total)));
+            boolean idle = !scrolling[0] && !scrolling[1] && !scrolling[2];
+            Button save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (save != null) save.setEnabled(total > 0 && idle);
+            for (int i = 0; i < addButtons.length; i++) {
+                boolean enabled = idle && total + increments[i] <= pickerMaximum;
+                addButtons[i].setEnabled(enabled);
+                addButtons[i].setAlpha(enabled ? 1f : 0.45f);
+            }
+        };
+        for (int i = 0; i < pickers.length; i++) {
+            final int index = i;
+            pickers[i].setOnValueChangedListener((picker, previous, next) -> { error.setText(""); refresh.run(); });
+            pickers[i].setOnScrollListener((picker, state) -> {
+                scrolling[index] = state != NumberPicker.OnScrollListener.SCROLL_STATE_IDLE;
+                refresh.run();
+            });
+        }
+        for (int i = 0; i < addButtons.length; i++) {
+            final int increment = increments[i];
+            addButtons[i].setOnClickListener(v -> {
+                int total = Math.min(pickerMaximum, durationSeconds(hours, minutes, seconds) + increment);
+                // Restore ranges before setting values, then apply the limit to the new selection.
+                minutes.setMaxValue(59); seconds.setMaxValue(59);
+                hours.setValue(total / 3600); minutes.setValue((total % 3600) / 60); seconds.setValue(total % 60);
+                error.setText(""); refresh.run();
+            });
+        }
+        dialog.setOnShowListener(d -> {
+            refresh.run();
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                int total = durationSeconds(hours, minutes, seconds);
+                // Recheck the latest reported limit in case it changed while the picker was open.
+                int latestMaximum = productionMaximum(controller, action);
+                if (latestMaximum > 0 && total > latestMaximum) {
+                    error.setText("Maximum is now " + durationLabel(latestMaximum) + ". Choose a shorter time."); return;
+                }
+                if (total < 1) { error.setText("Choose a duration above zero."); return; }
+                controller.saveProductionSeconds(action, total); dialog.dismiss();
+            });
+        });
         dialog.show();
+    }
+
+    private int productionMaximum(AppController controller, String action) {
+        JSONObject controls = controller.session().pagePayload("deviceControl").optJSONObject("productionControls");
+        JSONObject output = controls == null ? null : controls.optJSONObject(action);
+        return output == null ? 0 : output.optInt("maxSeconds");
+    }
+
+    private int durationSeconds(NumberPicker hours, NumberPicker minutes, NumberPicker seconds) {
+        return hours.getValue() * 3600 + minutes.getValue() * 60 + seconds.getValue();
+    }
+
+    private NumberPicker addDurationWheel(AppController controller, Ui ui, LinearLayout row, String unit, int maximum) {
+        LinearLayout column = ui.column();
+        column.setGravity(Gravity.CENTER_HORIZONTAL);
+        TextView label = ui.text(unit, 13, AppColors.MUTED, Typeface.BOLD);
+        label.setGravity(Gravity.CENTER);
+        NumberPicker picker = new NumberPicker(controller.activity());
+        picker.setId(View.generateViewId());
+        picker.setMinValue(0); picker.setMaxValue(maximum);
+        picker.setWrapSelectorWheel(false);
+        picker.setFormatter(value -> String.format(Locale.getDefault(), "%02d", value));
+        picker.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        picker.setContentDescription(unit);
+        label.setLabelFor(picker.getId());
+        column.addView(label, ui.matchWrap());
+        column.addView(picker, new LinearLayout.LayoutParams(-1, ui.dp(150)));
+        row.addView(column, new LinearLayout.LayoutParams(0, -2, 1));
+        return picker;
     }
 
     private void addMachineControls(LinearLayout root, AppController controller, Ui ui) {
         JSONObject status = controller.session().pagePayload("deviceControl");
-        boolean enabled = status.optBoolean("enabled", false);
+        boolean enabled = controller.hasMachineAccess();
         JSONObject device = status.optJSONObject("device");
         boolean online = device != null
             ? device.optBoolean("connected", false)
@@ -227,6 +382,10 @@ public class ProcessTrackingScreen implements AppScreen {
             "completed".equalsIgnoreCase(processState);
         boolean startAvailable = enabled && online && !commandActive && startableState;
         boolean checksPassed = controller.automaticMachineChecksReady();
+        JSONObject production = status.optJSONObject("productionControls");
+        JSONObject cycle = production == null ? null : production.optJSONObject("run");
+        boolean pumpPrepared = production != null && production.optBoolean("fresh") && cycle != null
+            && "pump".equals(cycle.optString("output")) && "waiting_for_paper".equals(cycle.optString("state"));
 
         root.addView(ui.pill(online ? "PaperBriq online" : "PaperBriq offline", online ? AppColors.GREEN : AppColors.RED),
             ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(10)));
@@ -249,10 +408,10 @@ public class ProcessTrackingScreen implements AppScreen {
         card.addView(statusText, ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(12)));
 
         Button start = ui.greenButton("Start forming");
-        start.setEnabled(startAvailable && checksPassed);
+        start.setEnabled(startAvailable && checksPassed && pumpPrepared);
         start.setOnClickListener(view -> controller.confirmAction(
             "Start forming briquettes?",
-            "This runs the forming sequence only. Drying is not enabled. Confirm the machine works, the door is closed, and the area is clear. A completed component test does not prove physical movement.",
+            "The gates close first. Wait for Ready for paper before feeding. Paper at the shredder inlet starts shredding, mixing and the preset water dose. Drying starts separately after loading the chamber.",
             () -> controller.sendDeviceCommand("start")
         ));
         Button stop = ui.greenButton("Stop");
@@ -274,6 +433,8 @@ public class ProcessTrackingScreen implements AppScreen {
             action.setPadding(ui.dp(4), ui.dp(8), ui.dp(4), ui.dp(8));
         }
         ui.addGrid(card, new android.view.View[]{start, stop, reset}, 3);
+        if (!pumpPrepared && startableState) card.addView(ui.text("Enable the preset pump below, then use Reset before Start forming.",
+            13, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, ui.dp(8), 0, ui.dp(12)));
 
         Button autoCheck = ui.greenButton("Check machine");
         autoCheck.setOnClickListener(view -> showFunctionalChecks(controller, ui));
@@ -282,10 +443,10 @@ public class ProcessTrackingScreen implements AppScreen {
             12, AppColors.MUTED, Typeface.NORMAL),
             ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(8)));
 
-        if (!controller.hasControlKey()) {
-            Button key = ui.outlineButton("Set up machine access");
-            key.setOnClickListener(view -> controller.showControlKeyDialog(null));
-            card.addView(key, ui.fullWidth(ui.dp(48), 0, ui.dp(8), 0, 0));
+        if (!enabled) {
+            Button signIn = ui.outlineButton(controller.isDemoAdmin() ? "Machine access" : "Sign in for machine access");
+            signIn.setOnClickListener(view -> controller.signInForMachineAccess());
+            card.addView(signIn, ui.fullWidth(ui.dp(48), 0, ui.dp(8), 0, 0));
         }
         root.addView(card);
     }
@@ -337,7 +498,7 @@ public class ProcessTrackingScreen implements AppScreen {
                     rows.addView(ui.text(item.optString("label") + " — " + label, 14,
                         done ? AppColors.GREEN_DARK : AppColors.INK, Typeface.BOLD), ui.fullWidth(-2, 0, 0, 0, ui.dp(10)));
                 }
-                boolean available = status.optBoolean("enabled", false) && health != null
+                boolean available = controller.hasMachineAccess() && health != null
                     && health.optBoolean("componentTestsSupported", false) && health.optBoolean("passed", false)
                     && health.optLong("validForMs", 0) > 0;
                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(available);

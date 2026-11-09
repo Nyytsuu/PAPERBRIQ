@@ -1,6 +1,7 @@
 // Controller events describe commanded steps, not proof of physical movement.
 const STAGES = [
   { id: "prepare", name: "Prepare gates", event: "PROCESS_STARTED" },
+  { id: "paper", name: "Waiting for paper", event: "WAITING_FOR_PAPER" },
   { id: "shred", name: "Shred and mix", event: "SHREDDER_MIXER_STARTED" },
   { id: "mix", name: "Finish mixing", event: "SHREDDER_COMPLETED" },
   { id: "transfer", name: "Release into molder", event: "MATERIAL_RELEASE_STARTED" },
@@ -50,7 +51,7 @@ function buildMachineProcess(control) {
     label,
     startedAt: hasRun ? start.createdAt : null,
     updatedAt: evidence[0]?.createdAt || null,
-    detail: "Reported controller steps; motor and gate movement is not measured. Drying is not enabled.",
+    detail: "Reported controller steps; motor and gate movement is not measured. Start drying separately after loading the chamber.",
     steps: STAGES.map(stage => {
       const reported = evidence.find(event => event.type === stage.event);
       const isCurrent = hasRun && online && !terminal && !stoppedWithoutEvent && current?.id === stage.id;

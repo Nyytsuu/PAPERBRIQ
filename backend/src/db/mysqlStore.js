@@ -1,6 +1,7 @@
 const { randomUUID } = require("crypto");
 const { ROLE_LABELS } = require("../config/roles");
 const { parseMysqlDatabaseUrl } = require("../config/database");
+const { MANILA_OFFSET_SECONDS, DAY_SECONDS } = require("../data/monthlyReports");
 const {
   canAcknowledge,
   inferProcessState,
@@ -38,6 +39,10 @@ function createMysqlStore(databaseUrl) {
     configured: true,
     async close() {
       await pool.end();
+    },
+    async getMachineOperator(id) {
+      const [rows] = await pool.execute("SELECT id, role FROM app_users WHERE id = ? AND is_active = TRUE", [id]);
+      return rows[0] || null;
     },
     async login(email, password, role) {
       await ensureUserProfileColumns(pool);
@@ -816,6 +821,25 @@ function createMysqlStore(databaseUrl) {
       } finally {
         connection.release();
       }
+    },
+    async getMonthlyReportRecords({ fromSeconds, toSeconds }) {
+      return withSchemaFallback(async () => {
+        const [rows] = await pool.execute(
+          `SELECT FLOOR((UNIX_TIMESTAMP(collected_at) + ${MANILA_OFFSET_SECONDS}) / ${DAY_SECONDS}) AS report_day,
+                  'paper' AS metric, SUM(paper_weight_kg) AS amount
+           FROM collection_events
+           WHERE collected_at >= FROM_UNIXTIME(?) AND collected_at < FROM_UNIXTIME(?)
+           GROUP BY report_day
+           UNION ALL
+           SELECT FLOOR((UNIX_TIMESTAMP(produced_at) + ${MANILA_OFFSET_SECONDS}) / ${DAY_SECONDS}) AS report_day,
+                  'briquettes' AS metric, SUM(briquettes_produced) AS amount
+           FROM briquette_batches
+           WHERE produced_at >= FROM_UNIXTIME(?) AND produced_at < FROM_UNIXTIME(?)
+           GROUP BY report_day`,
+          [fromSeconds, toSeconds, fromSeconds, toSeconds]
+        );
+        return rows;
+      }, () => null);
     },
     async getReports() {
       return withSchemaFallback(async () => {

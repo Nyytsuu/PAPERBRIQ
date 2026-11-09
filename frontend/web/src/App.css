@@ -1797,10 +1797,28 @@ textarea::placeholder {
   gap: 18px;
 }
 
-.reports-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
-  gap: 18px;
+.reports-page .report-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.report-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.report-week-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-week-table th,
+.report-week-table td {
+  padding: 12px 8px;
+  border-bottom: 1px solid var(--line);
 }
 
 .reward-grid,
@@ -3356,7 +3374,6 @@ textarea::placeholder {
   .iot-overview,
   .iot-detail-grid,
   .live-sensor-grid,
-  .reports-layout,
   .report-grid,
   .sensor-grid,
   .network-strip,

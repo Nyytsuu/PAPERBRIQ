@@ -2,6 +2,8 @@ package com.paperbriq.app.ui;
 
 import android.app.AlertDialog;
 import android.animation.ValueAnimator;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.view.Gravity;
@@ -124,15 +126,39 @@ public class AppShell {
     }
 
     private void showMenu(AppController controller) {
-        boolean controls = controller.canControlMachine();
-        String[] choices = controls ? new String[]{"Machine access", "Log out"} : new String[]{"Log out"};
+        String accountId = controller.canControlMachine() && !controller.session().user.isNull("id")
+            ? controller.session().user.optString("id").trim() : "";
+        boolean demoAdmin = controller.isDemoAdmin();
+        String[] options = accountId.isEmpty()
+            ? new String[]{"Log out"}
+            : new String[]{demoAdmin ? "Machine access" : "Operator account ID", "Log out"};
         new AlertDialog.Builder(controller.activity())
             .setTitle("PaperBriq")
-            .setItems(choices, (dialog, which) -> {
-                if (controls && which == 0) {
-                    controller.showControlKeyDialog(null);
+            .setItems(options, (dialog, which) -> {
+                if (!accountId.isEmpty() && which == 0) {
+                    if (demoAdmin) controller.signInForMachineAccess();
+                    else showOperatorId(controller, accountId);
                 } else {
                     controller.confirmAction("Log out?", "You will need to sign in again.", controller::logout);
+                }
+            })
+            .setNegativeButton("Close", null)
+            .show();
+    }
+
+    private void showOperatorId(AppController controller, String accountId) {
+        if (accountId.startsWith("demo-")) {
+            controller.showInfoDialog("Operator account ID unavailable",
+                "You are signed in with a demo account. Connect the PaperBriq backend to its database on Render, then sign out and sign in with your admin or barangay staff account. Open this menu again to copy your real account ID.");
+            return;
+        }
+        new AlertDialog.Builder(controller.activity())
+            .setTitle("Operator account ID")
+            .setMessage(accountId + "\n\nAdd this ID to MACHINE_OPERATOR_IDS on the PaperBriq backend to approve machine access.")
+            .setPositiveButton("Copy ID", (dialog, which) -> {
+                ClipboardManager clipboard = controller.activity().getSystemService(ClipboardManager.class);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("PaperBriq operator account ID", accountId));
                 }
             })
             .setNegativeButton("Close", null)

@@ -81,8 +81,9 @@ and **D4 for the heater (10 seconds)** through `PAPERBRIQ_STANDALONE_BENCH=1`. S
 [standalone test instructions](ArduinoUnoMotorTest/README.md#current-standalone-function-test-mode)
 for J/Y commands, cooldowns, thermostat/airflow/water requirements and limitations.
 These tests are separate from the automatic component check and production cycle.
-Normal verification flags remain 0; pump suppression and an independent heater
-cutoff remain outstanding. Restore standalone mode to 0 after the brief checks.
+On 2026-10-31 the operator confirmed pump suppression and an independent heater
+cutoff are installed; the two verification flags now default to 1. Standalone
+mode remains 0. Automatic pump dosing still needs a measured flow/dose limit.
 Thermostat S1 must not connect to **A4**, which is the I2C data line. A current
 fuse does not replace an independent temperature-operated cutoff. Normal heater
 testing requires a fresh ESP32 temperature reply; temporary standalone testing
@@ -90,9 +91,10 @@ relies on the external thermostat instead.
 
 The revised app saves production durations on the server and sends run-specific
 start/time-adjustment commands. The Uno owns the deadlines and reports remaining
-time. The paper sensor triggers one water run during mixing; drying starts
-separately after loading. Hardware verification flags and maximum operating
-durations remain unset, so production output is disabled until commissioning.
+time. Shredder IN GPIO26 triggers shredding, mixing and one prepared water run
+after Start and gate closure; OUT GPIO19 is monitoring only. Drying starts
+separately after loading, with an initial 600-second ceiling. The pump maximum
+remains 0 until measured, so automatic dosing and full forming remain unavailable.
 See [production timer controls](TIMED_CONTROLS.md). Temperature is set on the
 external thermostat. The supplied labels specify a 12 V / 100 W heater
 (about 8.3 A at rated power), and a 12 V power-to-unlock LY-03B lock whose listing

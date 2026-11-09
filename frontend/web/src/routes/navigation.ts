@@ -9,8 +9,8 @@ export const sectionCopy = {
     subtitle: "A live view of production, collection, and machine health."
   },
   reports: {
-    title: "Performance History",
-    subtitle: "Historical output, collection, and environmental performance."
+    title: "Production Reports",
+    subtitle: "Paper collection and briquette production totals."
   },
   iot: {
     title: "Live Telemetry",

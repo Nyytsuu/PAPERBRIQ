@@ -3,7 +3,6 @@ import { backendFetch } from "../api/backendFetch";
 import { ConfirmModal, Panel } from "./ui";
 
 const DEVICE_ID = "paperbriq-esp32";
-const CONTROL_KEY_STORAGE = "paperbriqControlKey";
 const CONTROL_POLL_MS = 3000;
 const TOAST_EVENT_TYPES = new Set([
   "MIXER_STARTED",
@@ -13,7 +12,6 @@ const TOAST_EVENT_TYPES = new Set([
 ]);
 
 export default function MachineControls() {
-  const [controlKey, setControlKey] = React.useState(() => readSessionControlKey());
   const [status, setStatus] = React.useState(null);
   const [statusMessage, setStatusMessage] = React.useState("Checking remote-control status...");
   const [commandMessage, setCommandMessage] = React.useState(null);
@@ -105,17 +103,9 @@ export default function MachineControls() {
     };
   }, [loadControlStatus]);
 
-  function updateControlKey(value) {
-    setControlKey(value);
-    if (value) sessionStorage.setItem(CONTROL_KEY_STORAGE, value);
-    else sessionStorage.removeItem(CONTROL_KEY_STORAGE);
-    setCommandMessage(null);
-  }
-
   async function sendCommand(command) {
-    const key = controlKey.trim();
-    if (!key) {
-      setCommandMessage({ tone: "error", text: "Enter the operator control key before sending a command." });
+    if (!status?.operatorAuthorized) {
+      setCommandMessage({ tone: "error", text: "Sign in again with an approved machine operator account." });
       return;
     }
 
@@ -126,8 +116,7 @@ export default function MachineControls() {
       const result = await backendFetch("/api/device/commands", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "X-Control-Key": key
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           deviceId: DEVICE_ID,
@@ -152,15 +141,15 @@ export default function MachineControls() {
   const processState = String(status?.processState || "unknown");
   const remoteAvailable = Boolean(status?.enabled && status?.configured);
   const connected = Boolean(status?.device?.connected);
-  const keyReady = Boolean(controlKey.trim());
+  const authorized = Boolean(status?.operatorAuthorized);
   const safeToStart = isStartableState(processState);
   const faulted = isFaultState(processState);
   const latestCommand = Array.isArray(status?.commands) ? status.commands[0] : null;
   const latestCommandInFlight = ["queued", "delivered"].includes(String(latestCommand?.status || "").toLowerCase());
   const stopAlreadyQueued = latestCommandInFlight && String(latestCommand?.command || "").toLowerCase() === "stop";
-  const startEnabled = remoteAvailable && connected && keyReady && safeToStart && !pendingCommand && !latestCommandInFlight;
-  const stopEnabled = remoteAvailable && keyReady && !pendingCommand && !stopAlreadyQueued;
-  const resetEnabled = remoteAvailable && connected && keyReady && faulted && !pendingCommand && !latestCommandInFlight;
+  const startEnabled = remoteAvailable && connected && authorized && safeToStart && !pendingCommand && !latestCommandInFlight;
+  const stopEnabled = remoteAvailable && authorized && !pendingCommand && !stopAlreadyQueued;
+  const resetEnabled = remoteAvailable && connected && authorized && faulted && !pendingCommand && !latestCommandInFlight;
   const activeError = errorAlerts[0] || null;
 
   return (
@@ -175,26 +164,6 @@ export default function MachineControls() {
           </span>
         }
       >
-        <div className="control-key-row">
-          <label className="control-key-field">
-            <span>Operator control key</span>
-            <input
-              type="password"
-              autoComplete="off"
-              spellCheck="false"
-              value={controlKey}
-              placeholder="Enter control key"
-              onChange={(event) => updateControlKey(event.target.value)}
-            />
-            <small>Kept only in this browser tab session. It is never saved to local storage.</small>
-          </label>
-          {controlKey && (
-            <button className="forget-control-key" type="button" onClick={() => updateControlKey("")}>
-              Forget key
-            </button>
-          )}
-        </div>
-
         <div className="control-status-grid" aria-label="Machine control status">
           <StatusItem label="Process state" value={humanize(processState)} tone={faulted ? "danger" : connected ? "ready" : "muted"} />
           <StatusItem
@@ -213,21 +182,21 @@ export default function MachineControls() {
           <ControlButton
             tone="start"
             label={pendingCommand === "start" ? "Queuing Start..." : "Start Process"}
-            detail={startDisabledReason({ status, remoteAvailable, connected, keyReady, safeToStart, processState, latestCommandInFlight })}
+            detail={startDisabledReason({ status, remoteAvailable, connected, authorized, safeToStart, processState, latestCommandInFlight })}
             disabled={!startEnabled}
             onClick={() => setConfirmCommand("start")}
           />
           <ControlButton
             tone="stop"
             label={pendingCommand === "stop" ? "Queuing Stop..." : "Software Stop"}
-            detail={stopDisabledReason({ status, remoteAvailable, keyReady, stopAlreadyQueued })}
+            detail={stopDisabledReason({ status, remoteAvailable, authorized, stopAlreadyQueued })}
             disabled={!stopEnabled}
             onClick={() => sendCommand("stop")}
           />
           <ControlButton
             tone="reset"
             label={pendingCommand === "reset" ? "Queuing Reset..." : "Reset Fault"}
-            detail={resetDisabledReason({ status, remoteAvailable, connected, keyReady, faulted, processState, latestCommandInFlight })}
+            detail={resetDisabledReason({ status, remoteAvailable, connected, authorized, faulted, processState, latestCommandInFlight })}
             disabled={!resetEnabled}
             onClick={() => setConfirmCommand("reset")}
           />
@@ -333,40 +302,32 @@ function ControlButton({ tone, label, detail, disabled, onClick }) {
   );
 }
 
-function startDisabledReason({ status, remoteAvailable, connected, keyReady, safeToStart, processState, latestCommandInFlight }) {
+function startDisabledReason({ status, remoteAvailable, connected, authorized, safeToStart, processState, latestCommandInFlight }) {
   if (!status) return "Waiting for backend status.";
-  if (!remoteAvailable) return status.configured ? "Remote control is disabled." : "Server control key is not configured.";
+  if (!remoteAvailable) return "Remote control is unavailable.";
   if (!connected) return "Unavailable while the ESP32 is offline.";
-  if (!keyReady) return "Enter the operator control key.";
+  if (!authorized) return "Sign in again with an approved operator account.";
   if (latestCommandInFlight) return "Waiting for the ESP32 to finish the queued command.";
   if (!safeToStart) return `Unavailable while process state is ${humanize(processState)}.`;
   return "Requires confirmation before the command is queued.";
 }
 
-function stopDisabledReason({ status, remoteAvailable, keyReady, stopAlreadyQueued }) {
+function stopDisabledReason({ status, remoteAvailable, authorized, stopAlreadyQueued }) {
   if (!status) return "Waiting for backend status.";
-  if (!remoteAvailable) return status.configured ? "Remote control is disabled." : "Server control key is not configured.";
-  if (!keyReady) return "Enter the operator control key.";
+  if (!remoteAvailable) return "Remote control is unavailable.";
+  if (!authorized) return "Sign in again with an approved operator account.";
   if (stopAlreadyQueued) return "A Software Stop is already waiting for acknowledgement.";
   return "Queues a stop request even if the ESP32 has just disconnected.";
 }
 
-function resetDisabledReason({ status, remoteAvailable, connected, keyReady, faulted, processState, latestCommandInFlight }) {
+function resetDisabledReason({ status, remoteAvailable, connected, authorized, faulted, processState, latestCommandInFlight }) {
   if (!status) return "Waiting for backend status.";
-  if (!remoteAvailable) return status.configured ? "Remote control is disabled." : "Server control key is not configured.";
+  if (!remoteAvailable) return "Remote control is unavailable.";
   if (!connected) return "Unavailable while the ESP32 is offline.";
-  if (!keyReady) return "Enter the operator control key.";
+  if (!authorized) return "Sign in again with an approved operator account.";
   if (latestCommandInFlight) return "Waiting for the ESP32 to finish the queued command.";
   if (!faulted) return `Available only for a reported fault, not ${humanize(processState)}.`;
   return "Clears a software fault only; it never restarts the machine.";
-}
-
-function readSessionControlKey() {
-  try {
-    return sessionStorage.getItem(CONTROL_KEY_STORAGE) || "";
-  } catch (error) {
-    return "";
-  }
 }
 
 function isStartableState(value) {

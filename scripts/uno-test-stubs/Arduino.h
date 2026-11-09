@@ -6,11 +6,13 @@
 #include <sstream>
 #include <string>
 #define F(x) (x)
+#define PROGMEM
 typedef char __FlashStringHelper;
 #define _BV(x) (1U << (x))
 #define HIGH 1
 #define LOW 0
 #define OUTPUT 1
+#define INPUT_PULLUP 2
 #define A0 14
 #define A1 15
 #define A2 16
@@ -20,7 +22,12 @@ extern unsigned long testMillis;
 extern int testOutputs[32];
 inline unsigned long millis() { return testMillis; }
 inline void delay(unsigned long ms) { testMillis += ms; }
-inline void pinMode(int, int) {}
+inline int &testInput(int pin) {
+  static int values[32] = {};
+  return values[pin];
+}
+inline void pinMode(int pin, int mode) { if (mode == INPUT_PULLUP) testInput(pin) = HIGH; }
+inline int digitalRead(int pin) { return testInput(pin); }
 inline void digitalWrite(int pin, int value) { testOutputs[pin] = value; }
 inline void analogWrite(int pin, int value) { testOutputs[pin] = value; }
 struct Print {

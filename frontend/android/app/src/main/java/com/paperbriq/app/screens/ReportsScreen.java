@@ -1,5 +1,8 @@
 package com.paperbriq.app.screens;
 
+import android.graphics.Typeface;
+import android.view.View;
+import android.widget.Button;
 import android.widget.LinearLayout;
 
 import com.paperbriq.app.AppColors;
@@ -10,6 +13,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public class ReportsScreen implements AppScreen {
+    private boolean lastMonthSelected;
+
     @Override
     public String key() {
         return "reports";
@@ -27,87 +32,72 @@ public class ReportsScreen implements AppScreen {
 
     @Override
     public String subtitle() {
-        return "Production trends and environmental impact over time.";
+        return "Paper collection and briquette production totals.";
     }
 
     @Override
     public void render(LinearLayout root, AppController controller) {
         Ui ui = controller.ui();
         JSONObject reports = controller.session().pagePayload("reports");
-        JSONObject charts = reports.optJSONObject("charts");
-        JSONObject chartMeta = reports.optJSONObject("chartMeta");
-        JSONArray labels = chartMeta != null ? chartMeta.optJSONArray("labels") : null;
-        if (charts == null) charts = new JSONObject();
+        JSONObject monthly = reports.optJSONObject("monthly");
+        JSONObject period = monthly == null ? null : monthly.optJSONObject(lastMonthSelected ? "lastMonth" : "thisMonth");
 
-        ui.addGrid(root, new android.view.View[]{
-            ui.filterCard("Report period", reports.optString("period", "Waiting for records"))
-        }, 1);
-        ui.addGrid(root, statCards(ui, reports.optJSONArray("cards")), 2);
-
-        root.addView(ui.sectionTitle("Charts", ""));
-        ui.addGrid(root, new android.view.View[]{
-            ui.barChartCard("Paper Collected (kg)", chartRows(charts.optJSONArray("paperCollected"), labels)),
-            ui.barChartCard("Briquettes Produced (pcs)", chartRows(charts.optJSONArray("briquettesProduced"), labels)),
-            ui.barChartCard("Water Saved (L)", chartRows(charts.optJSONArray("waterSaved"), labels))
-        }, 1);
-
-        ui.addGrid(root, new android.view.View[]{
-            ui.infoListCard("Top Barangays", barangayRows(reports.optJSONArray("topBarangays"), ui)),
-            ui.infoListCard("Environmental Impact", impactRows(reports.optJSONArray("impact")))
-        }, 1);
+        Button thisMonth = lastMonthSelected ? ui.outlineButton("This month") : ui.greenButton("This month");
+        Button lastMonth = lastMonthSelected ? ui.greenButton("Last month") : ui.outlineButton("Last month");
+        thisMonth.setSelected(!lastMonthSelected);
+        lastMonth.setSelected(lastMonthSelected);
+        thisMonth.setOnClickListener(v -> selectMonth(false, root, controller));
+        lastMonth.setOnClickListener(v -> selectMonth(true, root, controller));
+        ui.addGrid(root, new View[]{thisMonth, lastMonth}, 2);
+        root.addView(ui.sectionTitle(period == null ? "Production summary" : period.optString("month"), ""));
+        if (period != null) {
+            root.addView(ui.text(period.optString("dateRange") + " · Updated " + reports.optString("displayTime", "—"),
+                12, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, 0, 0, ui.dp(12)));
+        }
+        ui.addGrid(root, new View[]{
+            ui.readingCard("Paper Collected", value(ui, period, "paperKg", " kg"), "", AppColors.GREEN),
+            ui.readingCard("Briquettes Produced", value(ui, period, "briquettes", " pcs"), "", AppColors.AMBER)
+        }, 2);
+        root.addView(ui.sectionTitle("Weekly breakdown", ""));
+        if (monthly != null && !monthly.optBoolean("recordsAvailable")) {
+            root.addView(ui.text("Recorded data is unavailable.", 13, AppColors.MUTED, Typeface.NORMAL));
+        }
+        JSONArray weeks = period == null ? null : period.optJSONArray("weeks");
+        if (weeks != null) {
+            LinearLayout table = ui.card(16);
+            table.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(4));
+            addWeekRow(ui, table, "Dates", "Paper (kg)", "Briquettes", true);
+            for (int i = 0; i < weeks.length(); i++) {
+                JSONObject week = weeks.optJSONObject(i);
+                if (week == null) continue;
+                boolean empty = week.isNull("paperKg") && week.isNull("briquettes");
+                addWeekRow(ui, table, week.optString("label"),
+                    empty ? "No records" : value(ui, week, "paperKg", ""),
+                    empty ? "" : value(ui, week, "briquettes", ""), false);
+            }
+            root.addView(table, ui.fullWidth(-2, 0, ui.dp(4), 0, ui.dp(12)));
+        }
+        root.addView(ui.text("Paper used · Bond paper, 20 lb (about 75 gsm)", 12, AppColors.MUTED, Typeface.NORMAL));
     }
 
-    private android.view.View[] statCards(Ui ui, JSONArray cards) {
-        if (cards == null || cards.length() == 0) {
-            return new android.view.View[]{ui.statCard("No report data", "--", "Waiting for records", AppColors.GREEN)};
-        }
-        android.view.View[] views = new android.view.View[cards.length()];
-        for (int index = 0; index < cards.length(); index++) {
-            JSONObject card = cards.optJSONObject(index);
-            if (card == null) card = new JSONObject();
-            int color = index == 1 ? AppColors.AMBER : index == 2 ? AppColors.BLUE : AppColors.GREEN;
-            views[index] = ui.statCard(card.optString("label", "Metric"), card.optString("value", "--"), card.optString("change", ""), color);
-        }
-        return views;
+    private void selectMonth(boolean lastMonth, LinearLayout root, AppController controller) {
+        if (lastMonthSelected == lastMonth) return;
+        lastMonthSelected = lastMonth;
+        root.removeAllViews();
+        render(root, controller);
     }
 
-    private String[][] chartRows(JSONArray values, JSONArray labels) {
-        if (values == null || values.length() == 0) {
-            return new String[][]{{"--", "0"}};
-        }
-        String[][] rows = new String[values.length()][2];
-        for (int index = 0; index < values.length(); index++) {
-            rows[index][0] = labels != null ? labels.optString(index, String.valueOf(index + 1)) : String.valueOf(index + 1);
-            rows[index][1] = String.valueOf(values.optDouble(index, 0));
-        }
-        return rows;
+    private void addWeekRow(Ui ui, LinearLayout table, String dates, String paper, String briquettes, boolean header) {
+        LinearLayout row = ui.row();
+        row.setPadding(0, ui.dp(7), 0, ui.dp(7));
+        int style = header ? Typeface.BOLD : Typeface.NORMAL;
+        row.addView(ui.text(dates, 13, AppColors.INK, style), new LinearLayout.LayoutParams(0, -2, 1.35f));
+        row.addView(ui.text(paper, 13, AppColors.INK, style), new LinearLayout.LayoutParams(0, -2, 1));
+        row.addView(ui.text(briquettes, 13, AppColors.INK, style), new LinearLayout.LayoutParams(0, -2, 1));
+        table.addView(row, ui.fullWidth(-2, 0, 0, 0, 0));
     }
 
-    private String[][] barangayRows(JSONArray barangays, Ui ui) {
-        if (barangays == null || barangays.length() == 0) {
-            return new String[][]{{"--", "No barangay records yet"}};
-        }
-        String[][] rows = new String[barangays.length()][2];
-        for (int index = 0; index < barangays.length(); index++) {
-            JSONObject item = barangays.optJSONObject(index);
-            if (item == null) item = new JSONObject();
-            rows[index][0] = item.optString("barangay", "Unassigned");
-            rows[index][1] = ui.formatNumber(item.optDouble("paperKg", 0)) + " kg - " + ui.formatNumber(item.optInt("contributors", 0)) + " contributors";
-        }
-        return rows;
-    }
-
-    private String[][] impactRows(JSONArray impact) {
-        if (impact == null || impact.length() == 0) {
-            return new String[][]{{"--", "No impact records yet"}};
-        }
-        String[][] rows = new String[impact.length()][2];
-        for (int index = 0; index < impact.length(); index++) {
-            JSONObject item = impact.optJSONObject(index);
-            if (item == null) item = new JSONObject();
-            rows[index][0] = item.optString("label", "Impact");
-            rows[index][1] = item.optString("value", "--");
-        }
-        return rows;
+    private String value(Ui ui, JSONObject data, String key, String unit) {
+        return data == null || data.isNull(key) ? "—" : ui.formatNumber(data.optDouble(key)) + unit;
     }
 }

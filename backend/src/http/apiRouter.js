@@ -8,21 +8,23 @@ const { encodeTimedCommand, buildTimedControls } = require("../db/timedControls"
 const { validateSettings, buildProductionControls, encodeProductionCommand } = require('../db/productionControls');
 const { readJson, sendJson } = require("./json");
 const { streamLive } = require("./liveStream");
+const { getReportsWithMonths } = require("../data/monthlyReports");
+const { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite } = require("./operatorSessions");
+
+const MACHINE_DEVICE_ID = "paperbriq-esp32";
 
 async function routeApi(req, res, requestUrl) {
   if (req.method === 'POST' && requestUrl.pathname === '/api/device/production-settings') {
-    const denied = requireControlAccess(req);
-    if (denied) { sendJson(res, denied.status, {error:denied.message}); return; }
     const body = await readJson(req), deviceId = normalizeDeviceId(body.deviceId);
     if (!deviceId) { sendJson(res,400,{error:'A valid deviceId is required.'}); return; }
     try {
+      const denied = await requireControlAccess(req, deviceId);
+      if (denied) { sendJson(res, denied.status, {error:denied.message}); return; }
       const settings = validateSettings(body);
       const latest = await dataStore.getMachineHealth(deviceId);
-      for (const key of ['pump','drying']) {
-        const maximum = latest?.health?.production?.[key+'MaxSeconds'];
-        if (Number.isInteger(maximum) && maximum > 0 && settings[key+'Seconds'] > maximum) {
-          sendJson(res,400,{error:`Maximum ${key} duration is ${maximum} seconds.`}); return;
-        }
+      const maximum = latest?.health?.production?.dryingMaxSeconds;
+      if (Number.isInteger(maximum) && maximum > 0 && settings.dryingSeconds > maximum) {
+        sendJson(res,400,{error:`Maximum drying duration is ${maximum} seconds.`}); return;
       }
       sendJson(res,200,{ settings:await dataStore.saveProductionSettings(deviceId,settings) });
     }
@@ -45,17 +47,11 @@ async function routeApi(req, res, requestUrl) {
   }
 
   if (req.method === "POST" && requestUrl.pathname === "/api/device/commands") {
-    const accessError = requireControlAccess(req);
-    if (accessError) {
-      sendJson(res, accessError.status, { error: accessError.message });
-      return;
-    }
-
     const body = await readJson(req);
     const deviceId = normalizeDeviceId(body.deviceId);
     let command = String(body.command || "").trim().toLowerCase();
     const timed = command === "heater" || command === "pump";
-    const productionCommand = ['pump_arm','drying_start','pump_time','drying_time'].includes(command);
+    const productionCommand = ['pump_arm','drying_start','drying_time','preheat_start'].includes(command);
     const idempotencyKey = normalizeOptionalToken(req.headers["idempotency-key"], 120);
     if (!deviceId) {
       sendJson(res, 400, { error: "A valid deviceId is required." });
@@ -75,6 +71,11 @@ async function routeApi(req, res, requestUrl) {
     }
 
     try {
+      const accessError = await requireControlAccess(req, deviceId);
+      if (accessError) {
+        sendJson(res, accessError.status, { error: accessError.message });
+        return;
+      }
       if (productionCommand) {
         const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
         const controls = buildProductionControls(await dataStore.getMachineHealth(deviceId), status, await dataStore.getProductionSettings(deviceId));
@@ -188,15 +189,20 @@ async function routeApi(req, res, requestUrl) {
       sendJson(res, 400, { error: "A valid deviceId query parameter is required." });
       return;
     }
-    const configured = Boolean(String(process.env.CONTROL_API_KEY || "").trim());
+    const controlKey = String(process.env.CONTROL_API_KEY || "").trim();
+    const configured = Boolean(controlKey) || operatorConfigured(dataStore);
     const enabled = remoteControlFlagEnabled() && configured;
     const onlineAfter = new Date(Date.now() - deviceOnlineSeconds() * 1000);
     try {
       const status = await dataStore.getDeviceControlStatus(deviceId, onlineAfter);
       const healthReport = await dataStore.getMachineHealth(deviceId);
+      res.setHeader("Cache-Control", "no-store");
       sendJson(res, 200, {
         enabled,
         configured,
+        temporaryMachineKeysSupported: true,
+        operatorAuthorized: enabled && deviceId === MACHINE_DEVICE_ID && Boolean(getOperator(req, dataStore)),
+        machineKeyAuthorized: enabled && deviceId === MACHINE_DEVICE_ID && secretsMatch(controlKey, req.headers["x-control-key"]),
         ...status,
         processRun: buildMachineProcess(status),
         componentTests: buildComponentTests(status),
@@ -234,7 +240,23 @@ async function routeApi(req, res, requestUrl) {
       return;
     }
 
-    sendJson(res, 200, { user, summary: await dataStore.getSummary() });
+    const summary = await dataStore.getSummary();
+    res.setHeader("Cache-Control", "no-store");
+    const demoEnrollmentVerified = remoteControlFlagEnabled() &&
+      secretsMatch(String(process.env.CONTROL_API_KEY || "").trim(), req.headers["x-control-key"]);
+    replaceOperatorSession(req, res, dataStore, user, demoEnrollmentVerified);
+    sendJson(res, 200, { user, summary });
+    return;
+  }
+
+  if (req.method === "POST" && requestUrl.pathname === "/api/auth/logout") {
+    if (!isSessionWrite(req)) {
+      sendJson(res, 403, { error: "Sign-out must come from the app." });
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    replaceOperatorSession(req, res, dataStore, null);
+    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -508,7 +530,7 @@ async function routeApi(req, res, requestUrl) {
   }
 
   if (req.method === "GET" && requestUrl.pathname === "/api/reports") {
-    sendJson(res, 200, await dataStore.getReports());
+    sendJson(res, 200, await getReportsWithMonths(dataStore));
     return;
   }
 
@@ -585,16 +607,23 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function requireControlAccess(req) {
+async function requireControlAccess(req, deviceId) {
   if (!remoteControlFlagEnabled()) {
     return { status: 403, message: "Remote device control is disabled." };
   }
   const configuredKey = String(process.env.CONTROL_API_KEY || "").trim();
-  if (!configuredKey) {
-    return { status: 503, message: "Remote control key is not configured." };
+  if (secretsMatch(configuredKey, req.headers["x-control-key"])) return null;
+  const operator = getOperator(req, dataStore);
+  if (!operator) {
+    return { status: 401, message: "Sign in again with an approved machine operator account." };
   }
-  if (!secretsMatch(configuredKey, req.headers["x-control-key"])) {
-    return { status: 401, message: "Invalid control API key." };
+  if (deviceId !== MACHINE_DEVICE_ID || !isSessionWrite(req)) {
+    return { status: 403, message: "This session cannot control the requested machine." };
+  }
+  if (operator.demoEnrollment) return null;
+  const current = await dataStore.getMachineOperator(operator.id);
+  if (current?.role !== operator.role) {
+    return { status: 403, message: "Machine access for this account has changed." };
   }
   return null;
 }
