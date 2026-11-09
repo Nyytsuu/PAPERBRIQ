@@ -162,6 +162,7 @@ backend and sign in to Android as the demo admin. Open **Menu → Machine access
 and enter the phone approval key once. The app verifies it over HTTPS and stores
 it on that phone with Android Keystore encryption. Sign in again to get a new
 temporary key. Each approved demo sign-in replaces the prior demo session.
+**Machine access** displays a six-digit reference code for that sign-in.
 Use **Forget phone** to clear the approval and sign out. No approved-account
 list is needed for this setup.
 

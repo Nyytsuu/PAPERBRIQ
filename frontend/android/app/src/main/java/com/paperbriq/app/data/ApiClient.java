@@ -11,10 +11,12 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public class ApiClient {
@@ -24,6 +26,7 @@ public class ApiClient {
         "http://10.0.2.2:4173"
     };
     private static final int TIMEOUT_MS = 2500;
+    private static final SecureRandom SESSION_CODE_RANDOM = new SecureRandom();
     private final List<String> apiBaseUrls;
     private final String configuredApiBaseUrl;
     private volatile OperatorSession operatorSession;
@@ -95,9 +98,9 @@ public class ApiClient {
             Collections.singletonMap("X-Control-Key", enrollmentKey));
     }
 
-    public String temporaryMachineKey() {
+    public String machineSessionCode() {
         OperatorSession active = operatorSession;
-        return active == null ? "" : active.cookie.substring("paperbriqOperator=".length());
+        return active == null ? "" : active.displayCode;
     }
 
     private String requireMachineKeyOrigin() {
@@ -245,10 +248,12 @@ public class ApiClient {
     private static final class OperatorSession {
         final String baseUrl;
         final String cookie;
+        final String displayCode;
 
         OperatorSession(String baseUrl, String cookie) {
             this.baseUrl = baseUrl;
             this.cookie = cookie;
+            this.displayCode = String.format(Locale.ROOT, "%06d", SESSION_CODE_RANDOM.nextInt(1_000_000));
         }
     }
 }

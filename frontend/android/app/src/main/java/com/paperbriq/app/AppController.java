@@ -524,29 +524,22 @@ public class AppController {
     }
 
     private void showDemoMachineSession() {
-        String key = apiClient.temporaryMachineKey();
         LinearLayout details = ui.column();
         details.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(12));
-        CheckBox showKey = new CheckBox(activity);
-        showKey.setText("Show temporary key");
-        TextView keyText = ui.text(key, 14, AppColors.INK, Typeface.NORMAL);
-        keyText.setTypeface(Typeface.MONOSPACE);
-        keyText.setVisibility(View.GONE);
-        showKey.setOnCheckedChangeListener((view, checked) -> keyText.setVisibility(checked ? View.VISIBLE : View.GONE));
-        details.addView(showKey, ui.matchWrap());
-        details.addView(keyText, ui.matchWrap());
-        AlertDialog dialog = new AlertDialog.Builder(activity)
-            .setTitle(hasMachineAccess() ? "Machine access active" : "Temporary machine key")
-            .setMessage("PaperBriq generates a new temporary key each time you sign in on this approved phone.")
+        details.addView(ui.text("Session code", 14, AppColors.MUTED, Typeface.NORMAL), ui.matchWrap());
+        TextView code = ui.text(apiClient.machineSessionCode(), 28, AppColors.INK, Typeface.BOLD);
+        code.setTypeface(Typeface.MONOSPACE);
+        details.addView(code, ui.matchWrap());
+        new AlertDialog.Builder(activity)
+            .setTitle(hasMachineAccess() ? "Machine access active" : "Machine access")
+            .setMessage("This code identifies your sign-in. PaperBriq authorizes commands automatically.")
             .setView(details)
             .setNeutralButton("Forget phone", (ignored, which) -> {
                 machineKeyStore.clear();
                 logout();
             })
             .setPositiveButton("Close", null)
-            .create();
-        dialog.show();
-        if (dialog.getWindow() != null) dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            .show();
     }
 
     private void showDemoMachineKeyDialog() {
