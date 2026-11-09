@@ -133,9 +133,11 @@ test("machine sign-in requires an approved active operator and stays scoped to o
     assert.equal((await stop({ ...https, Cookie: second })).status, 401);
 
     process.env.CONTROL_API_KEY = machineKey["X-Control-Key"];
-    process.env.MACHINE_ADMIN_PASSWORD = "fixture private password";
     const privateLogin = (password, headers = https) =>
       post("/api/auth/login", { email: "admin@paperbriq.local", password, role: "admin" }, headers);
+    process.env.MACHINE_ADMIN_PASSWORD = "test-admin-01";
+    assert.equal((await privateLogin(process.env.MACHINE_ADMIN_PASSWORD)).status, 503);
+    process.env.MACHINE_ADMIN_PASSWORD = "test-admin-014";
     assert.equal((await privateLogin("paperbriq123")).status, 401);
     assert.equal((await privateLogin(process.env.MACHINE_ADMIN_PASSWORD, {})).status, 403);
     assert.match((await login("demo@example.test", receiptHeaders)).headers.get("set-cookie"), /Max-Age=0/);

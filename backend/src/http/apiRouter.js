@@ -11,7 +11,7 @@ const { streamLive } = require("./liveStream");
 const { getReportsWithMonths } = require("../data/monthlyReports");
 const {
   getOperator, getMachineAdmin, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport,
-  machineAdminPassword, MACHINE_ADMIN_ID, MACHINE_ADMIN_EMAIL
+  machineAdminPassword, validMachineAdminPassword, MACHINE_ADMIN_ID, MACHINE_ADMIN_EMAIL, MACHINE_ADMIN_PASSWORD_MIN_LENGTH
 } = require("./operatorSessions");
 const { requestMachineKey, approveMachineKey, redeemMachineKey, validPhoneApproval } = require("./machineKeyRequests");
 
@@ -294,8 +294,8 @@ async function routeApi(req, res, requestUrl) {
         sendJson(res, 403, { error: "Private admin sign-in requires a secure connection." });
         return;
       }
-      if (!controlKey || privatePassword.length < 16 || privatePassword === controlKey) {
-        sendJson(res, 503, { error: "Set a separate private admin password of at least 16 characters on the server." });
+      if (!validMachineAdminPassword(privatePassword, controlKey)) {
+        sendJson(res, 503, { error: `Set a separate private admin password of at least ${MACHINE_ADMIN_PASSWORD_MIN_LENGTH} characters on the server.` });
         return;
       }
       const now = Date.now();

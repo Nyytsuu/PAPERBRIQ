@@ -159,7 +159,7 @@ server process and expire on restart. Android keeps its machine session in
 memory, so a restored app profile needs a fresh sign-in for machine access.
 For the single-phone thesis setup in demo mode, keep `CONTROL_API_KEY` and
 `REMOTE_CONTROL_ENABLED=true` on Render. Add `MACHINE_ADMIN_PASSWORD` as a
-separate private password with at least 16 characters. This replaces the
+separate private password with at least 14 characters. This replaces the
 public demo password for `admin@paperbriq.local` and invalidates previous demo
 phone approvals.
 

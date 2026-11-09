@@ -5,9 +5,14 @@ const SESSION_MS = 8 * 60 * 60 * 1000;
 const sessions = new Map();
 const MACHINE_ADMIN_ID = "machine-admin";
 const MACHINE_ADMIN_EMAIL = "admin@paperbriq.local";
+const MACHINE_ADMIN_PASSWORD_MIN_LENGTH = 14;
 
 function machineAdminPassword(store) {
   return store.configured ? "" : String(process.env.MACHINE_ADMIN_PASSWORD || "");
+}
+
+function validMachineAdminPassword(password, controlKey) {
+  return Boolean(controlKey) && password.length >= MACHINE_ADMIN_PASSWORD_MIN_LENGTH && password !== controlKey;
 }
 
 function operatorConfigured(store) {
@@ -27,7 +32,7 @@ function demoEnrollmentFingerprint(user, store) {
   const key = String(process.env.CONTROL_API_KEY || "").trim();
   if (store.configured || user?.role !== "admin" || !key) return null;
   const password = machineAdminPassword(store);
-  if (user.id === MACHINE_ADMIN_ID && password.length >= 16 && password !== key) {
+  if (user.id === MACHINE_ADMIN_ID && validMachineAdminPassword(password, key)) {
     return createHash("sha256").update(JSON.stringify([key, password])).digest("hex");
   }
   return user.id === "demo-admin" && !password ? createHash("sha256").update(key).digest("hex") : null;
@@ -105,5 +110,5 @@ function replaceOperatorSession(req, res, store, user, demoEnrollmentVerified = 
 
 module.exports = {
   getOperator, getMachineAdmin, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport,
-  machineAdminPassword, MACHINE_ADMIN_ID, MACHINE_ADMIN_EMAIL
+  machineAdminPassword, validMachineAdminPassword, MACHINE_ADMIN_ID, MACHINE_ADMIN_EMAIL, MACHINE_ADMIN_PASSWORD_MIN_LENGTH
 };
