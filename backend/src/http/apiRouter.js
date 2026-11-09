@@ -9,7 +9,8 @@ const { validateSettings, buildProductionControls, encodeProductionCommand } = r
 const { readJson, sendJson } = require("./json");
 const { streamLive } = require("./liveStream");
 const { getReportsWithMonths } = require("../data/monthlyReports");
-const { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite } = require("./operatorSessions");
+const { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport } = require("./operatorSessions");
+const { requestMachineKey, approveMachineKey, redeemMachineKey, validPhoneApproval } = require("./machineKeyRequests");
 
 const MACHINE_DEVICE_ID = "paperbriq-esp32";
 
@@ -201,6 +202,7 @@ async function routeApi(req, res, requestUrl) {
         enabled,
         configured,
         temporaryMachineKeysSupported: true,
+        machineKeyRequestsSupported: enabled && Boolean(controlKey) && !dataStore.configured,
         operatorAuthorized: enabled && deviceId === MACHINE_DEVICE_ID && Boolean(getOperator(req, dataStore)),
         machineKeyAuthorized: enabled && deviceId === MACHINE_DEVICE_ID && secretsMatch(controlKey, req.headers["x-control-key"]),
         ...status,
@@ -214,6 +216,43 @@ async function routeApi(req, res, requestUrl) {
     } catch (error) {
       sendStoreError(res, error, "Unable to read device control status.");
     }
+    return;
+  }
+
+  const machineKeyAction = /^\/api\/auth\/machine-key\/(request|approve|redeem)$/.exec(requestUrl.pathname)?.[1];
+  if (req.method === "POST" && machineKeyAction) {
+    res.setHeader("Cache-Control", "no-store");
+    const key = String(process.env.CONTROL_API_KEY || "").trim();
+    if (!secureTransport(req) || !isSessionWrite(req)) {
+      sendJson(res, 403, { error: "Machine key requests require a secure connection." });
+      return;
+    }
+    if (!key || dataStore.configured || !remoteControlFlagEnabled()) {
+      sendJson(res, 403, { error: "Machine key requests are unavailable on this server." });
+      return;
+    }
+    if (machineKeyAction === "approve" && !secretsMatch(key, req.headers["x-control-key"])) {
+      sendJson(res, 401, { error: "Machine administrator approval is required." });
+      return;
+    }
+    const body = await readJson(req);
+    if (machineKeyAction === "request") {
+      const request = requestMachineKey();
+      sendJson(res, request ? 201 : 429, request || { error: "Too many requests. Try again in five minutes." });
+      return;
+    }
+    const { code, requestId } = body;
+    if (typeof code !== "string" || !/^\d{6}$/.test(code)) {
+      sendJson(res, 400, { error: "Enter the six-digit machine key." });
+      return;
+    }
+    if (machineKeyAction === "approve") {
+      const approved = approveMachineKey(key, code);
+      sendJson(res, approved ? 200 : 404, approved ? { ok: true } : { error: "No active request for that key." });
+      return;
+    }
+    const { status, ...result } = redeemMachineKey(key, requestId, code);
+    sendJson(res, status, result);
     return;
   }
 
@@ -242,8 +281,10 @@ async function routeApi(req, res, requestUrl) {
 
     const summary = await dataStore.getSummary();
     res.setHeader("Cache-Control", "no-store");
+    const controlKey = String(process.env.CONTROL_API_KEY || "").trim();
     const demoEnrollmentVerified = remoteControlFlagEnabled() &&
-      secretsMatch(String(process.env.CONTROL_API_KEY || "").trim(), req.headers["x-control-key"]);
+      (validPhoneApproval(controlKey, req.headers["x-phone-approval"]) ||
+        secretsMatch(controlKey, req.headers["x-control-key"]));
     replaceOperatorSession(req, res, dataStore, user, demoEnrollmentVerified);
     sendJson(res, 200, { user, summary });
     return;

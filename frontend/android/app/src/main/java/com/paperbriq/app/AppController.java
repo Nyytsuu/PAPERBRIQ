@@ -7,6 +7,8 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -18,12 +20,11 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
 import android.os.SystemClock;
-import android.text.method.PasswordTransformationMethod;
+import android.text.InputFilter;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
-import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -504,15 +505,15 @@ public class AppController {
             JSONObject status = session.pagePayload("deviceControl");
             if (apiClient.hasOperatorSession()) {
                 showDemoMachineSession();
-            } else if (status.has("enabled") && !status.optBoolean("temporaryMachineKeysSupported")) {
+            } else if (status.has("enabled") && !status.has("machineKeyRequestsSupported")) {
                 showInfoDialog("Backend update needed",
-                    "Render is running a version that does not issue temporary machine keys. Deploy the updated PaperBriq backend, then sign out and back in.");
-            } else if (machineKeyStore.hasSavedApproval()) {
+                    "Deploy the updated PaperBriq backend on Render to request a six-digit machine key.");
+            } else if (ApiClient.isPhoneApproval(machineKeyStore.read(apiClient.machineKeyOrigin()))) {
                 new AlertDialog.Builder(activity)
-                    .setTitle("Temporary key unavailable")
-                    .setMessage("This phone has saved approval, but the server did not issue a temporary key for this sign-in. Sign in again, or recheck the phone approval if the Render key changed.")
+                    .setTitle("Machine access unavailable")
+                    .setMessage("Sign in again to use this phone's approval, or request a new machine key.")
                     .setPositiveButton("Sign in again", (dialog, which) -> logout())
-                    .setNeutralButton("Check approval", (dialog, which) -> showDemoMachineKeyDialog())
+                    .setNeutralButton("Request new key", (dialog, which) -> showDemoMachineKeyDialog())
                     .setNegativeButton("Close", null)
                     .show();
             } else {
@@ -524,16 +525,9 @@ public class AppController {
     }
 
     private void showDemoMachineSession() {
-        LinearLayout details = ui.column();
-        details.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(12));
-        details.addView(ui.text("Session code", 14, AppColors.MUTED, Typeface.NORMAL), ui.matchWrap());
-        TextView code = ui.text(apiClient.machineSessionCode(), 28, AppColors.INK, Typeface.BOLD);
-        code.setTypeface(Typeface.MONOSPACE);
-        details.addView(code, ui.matchWrap());
         new AlertDialog.Builder(activity)
             .setTitle(hasMachineAccess() ? "Machine access active" : "Machine access")
-            .setMessage("This code identifies your sign-in. PaperBriq authorizes commands automatically.")
-            .setView(details)
+            .setMessage("This phone is approved for PaperBriq.")
             .setNeutralButton("Forget phone", (ignored, which) -> {
                 machineKeyStore.clear();
                 logout();
@@ -543,70 +537,90 @@ public class AppController {
     }
 
     private void showDemoMachineKeyDialog() {
-        EditText input = ui.editText("Phone approval key", true);
-        CheckBox showKey = new CheckBox(activity);
-        showKey.setText("Show key");
-        showKey.setOnCheckedChangeListener((view, checked) -> {
-            input.setTransformationMethod(checked ? null : PasswordTransformationMethod.getInstance());
-            input.setSelection(input.length());
-        });
-        LinearLayout form = ui.column();
-        form.setPadding(ui.dp(20), 0, ui.dp(20), 0);
-        form.addView(input, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
-        form.addView(showKey, ui.matchWrap());
         AlertDialog dialog = new AlertDialog.Builder(activity)
             .setTitle("Machine access")
-            .setMessage("Approve this phone once with the CONTROL_API_KEY from Render. Then sign in to get a temporary machine key.")
-            .setView(form)
-            .setPositiveButton("Save key", null)
-            .setNeutralButton("Forget key", (ignored, which) -> {
-                machineKeyStore.clear();
-                logout();
-            })
+            .setMessage("Request a six-digit machine key to approve this phone.")
+            .setPositiveButton("Request machine key", null)
             .setNegativeButton("Cancel", null)
             .create();
         dialog.setOnShowListener(ignored -> {
             styleDialogButtons(dialog);
-            Button save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-            save.setOnClickListener(view -> {
-                String key = input.getText().toString().trim();
-                if (key.isEmpty()) {
-                    input.setError("Enter the machine key.");
+            Button request = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            request.setOnClickListener(view -> {
+                request.setEnabled(false);
+                executor.execute(() -> {
+                    try {
+                        JSONObject key = apiClient.requestMachineKey();
+                        activity.runOnUiThread(() -> {
+                            if (!dialog.isShowing() || !isDemoAdmin()) return;
+                            dialog.dismiss();
+                            showMachineKeyApproval(key.optString("requestId"), key.optString("code"));
+                        });
+                    } catch (Exception error) {
+                        activity.runOnUiThread(() -> {
+                            if (!dialog.isShowing()) return;
+                            dialog.setMessage(error.getMessage());
+                            request.setEnabled(true);
+                        });
+                    }
+                });
+            });
+        });
+        dialog.show();
+    }
+
+    private void showMachineKeyApproval(String requestId, String code) {
+        LinearLayout form = ui.column();
+        form.setPadding(ui.dp(20), 0, ui.dp(20), 0);
+        TextView display = ui.text(code, 28, AppColors.INK, Typeface.BOLD);
+        display.setTypeface(Typeface.MONOSPACE);
+        form.addView(display, ui.matchWrap());
+        Button copy = new Button(activity);
+        copy.setText("Copy machine key");
+        copy.setOnClickListener(view -> {
+            ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
+            clipboard.setPrimaryClip(ClipData.newPlainText("PaperBriq machine key", code));
+        });
+        form.addView(copy, ui.matchWrap());
+        EditText input = ui.editText("Paste six-digit machine key", false);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(6) });
+        form.addView(input, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+        AlertDialog dialog = new AlertDialog.Builder(activity)
+            .setTitle("Approve this phone")
+            .setMessage("Give this key to the machine administrator. After they approve it, paste it below within five minutes.")
+            .setView(form)
+            .setPositiveButton("Approve phone", null)
+            .setNeutralButton("Request new key", (ignored, which) -> showDemoMachineKeyDialog())
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnShowListener(ignored -> {
+            styleDialogButtons(dialog);
+            Button approve = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            approve.setOnClickListener(view -> {
+                String enteredCode = input.getText().toString();
+                if (!enteredCode.matches("[0-9]{6}")) {
+                    input.setError("Paste the six-digit machine key.");
                     return;
                 }
-                if (key.chars().anyMatch(character -> character < 32 || character == 127)) {
-                    input.setError("Enter the machine key on one line.");
-                    return;
-                }
-                save.setEnabled(false);
-                showKey.setChecked(false);
-                showKey.setEnabled(false);
+                approve.setEnabled(false);
                 dialog.setCancelable(false);
                 dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
                 dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
                 executor.execute(() -> {
                     try {
-                        JSONObject status = apiClient.getMachineKeyStatus(DEVICE_STATUS, key);
-                        if (!status.optBoolean("temporaryMachineKeysSupported")) {
-                            throw new IllegalStateException("Deploy the updated backend before saving the machine key.");
-                        }
-                        if (!status.optBoolean("enabled")) {
-                            throw new IllegalStateException("Enable remote control and set CONTROL_API_KEY on Render.");
-                        }
-                        if (!status.optBoolean("machineKeyAuthorized")) {
-                            throw new IllegalStateException("The machine key did not match Render.");
-                        }
-                        machineKeyStore.save(apiClient.machineKeyOrigin(), key);
+                        String receipt = apiClient.approvePhone(requestId, enteredCode);
+                        machineKeyStore.save(apiClient.machineKeyOrigin(), receipt);
                         activity.runOnUiThread(() -> {
-                            if (!isDemoAdmin()) return;
                             dialog.dismiss();
-                            confirmAction("Phone approved", "Sign in again to activate your temporary machine key.", this::logout);
+                            if (isDemoAdmin()) {
+                                confirmAction("Phone approved", "Sign in again to activate machine access.", this::logout);
+                            }
                         });
                     } catch (Exception error) {
                         activity.runOnUiThread(() -> {
                             input.setError(error.getMessage());
-                            showKey.setEnabled(true);
-                            save.setEnabled(true);
+                            approve.setEnabled(true);
                             dialog.setCancelable(true);
                             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
                             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(true);
@@ -616,8 +630,8 @@ public class AppController {
             });
         });
         dialog.show();
-        if (dialog.getWindow() != null) dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
     }
+
 
     public void sendDeviceCommand(String command) {
         sendDeviceCommand(command, 0);

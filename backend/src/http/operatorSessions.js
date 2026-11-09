@@ -81,4 +81,4 @@ function replaceOperatorSession(req, res, store, user, demoEnrollmentVerified = 
   res.setHeader("Set-Cookie", `${COOKIE}=${token}; ${attributes}; Max-Age=${SESSION_MS / 1000}`);
 }
 
-module.exports = { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite };
+module.exports = { getOperator, operatorConfigured, replaceOperatorSession, isSessionWrite, secureTransport };

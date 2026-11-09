@@ -11,12 +11,10 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 public class ApiClient {
@@ -26,7 +24,6 @@ public class ApiClient {
         "http://10.0.2.2:4173"
     };
     private static final int TIMEOUT_MS = 2500;
-    private static final SecureRandom SESSION_CODE_RANDOM = new SecureRandom();
     private final List<String> apiBaseUrls;
     private final String configuredApiBaseUrl;
     private volatile OperatorSession operatorSession;
@@ -88,19 +85,26 @@ public class ApiClient {
         return configuredApiBaseUrl;
     }
 
-    public JSONObject getMachineKeyStatus(String endpoint, String key) throws Exception {
-        return getJsonFrom(requireMachineKeyOrigin(), endpoint, Collections.singletonMap("X-Control-Key", key));
+    public JSONObject requestMachineKey() throws Exception {
+        return postJsonTo(requireMachineKeyOrigin(), "/api/auth/machine-key/request", new JSONObject(), Collections.emptyMap());
     }
 
-    public JSONObject login(JSONObject payload, String enrollmentKey) throws Exception {
-        if (enrollmentKey.isEmpty()) return postJson("/api/auth/login", payload);
+    public String approvePhone(String requestId, String code) throws Exception {
+        JSONObject body = new JSONObject().put("requestId", requestId).put("code", code);
+        JSONObject response = postJsonTo(requireMachineKeyOrigin(), "/api/auth/machine-key/redeem", body, Collections.emptyMap());
+        String receipt = response.getString("receipt");
+        if (!isPhoneApproval(receipt)) throw new IllegalStateException("PaperBriq could not verify this phone.");
+        return receipt;
+    }
+
+    public static boolean isPhoneApproval(String value) {
+        return value.matches("[a-f0-9]{64}\\.[a-f0-9]{64}");
+    }
+
+    public JSONObject login(JSONObject payload, String phoneApproval) throws Exception {
+        if (!isPhoneApproval(phoneApproval)) return postJson("/api/auth/login", payload);
         return postJsonTo(requireMachineKeyOrigin(), "/api/auth/login", payload,
-            Collections.singletonMap("X-Control-Key", enrollmentKey));
-    }
-
-    public String machineSessionCode() {
-        OperatorSession active = operatorSession;
-        return active == null ? "" : active.displayCode;
+            Collections.singletonMap("X-Phone-Approval", phoneApproval));
     }
 
     private String requireMachineKeyOrigin() {
@@ -181,7 +185,8 @@ public class ApiClient {
         connection.setRequestProperty("Accept", "application/json");
         applyHeaders(connection, headers);
         boolean login = "/api/auth/login".equals(endpoint);
-        if (login || headers.containsKey("Cookie") || headers.containsKey("X-Control-Key")) {
+        if (login || headers.containsKey("Cookie") || headers.containsKey("X-Control-Key") ||
+                endpoint.startsWith("/api/auth/machine-key/")) {
             connection.setInstanceFollowRedirects(false);
         }
         connection.setDoOutput(true);
@@ -248,12 +253,10 @@ public class ApiClient {
     private static final class OperatorSession {
         final String baseUrl;
         final String cookie;
-        final String displayCode;
 
         OperatorSession(String baseUrl, String cookie) {
             this.baseUrl = baseUrl;
             this.cookie = cookie;
-            this.displayCode = String.format(Locale.ROOT, "%06d", SESSION_CODE_RANDOM.nextInt(1_000_000));
         }
     }
 }

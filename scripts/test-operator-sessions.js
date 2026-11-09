@@ -80,6 +80,39 @@ test("machine sign-in requires an approved active operator and stays scoped to o
     assert.equal((await controlStatus(machineKey)).machineKeyAuthorized, false);
     process.env.REMOTE_CONTROL_ENABLED = "true";
     const https = { "X-Forwarded-Proto": "https" };
+    const pairing = (action, body, headers = https) => post("/api/auth/machine-key/" + action, body, headers);
+    assert.equal((await controlStatus(https)).machineKeyRequestsSupported, true);
+    assert.equal((await pairing("request", {}, {})).status, 403);
+    const requested = await pairing("request", {});
+    assert.equal(requested.status, 201);
+    assert.equal(requested.headers.get("cache-control"), "no-store");
+    const { code, requestId } = await requested.json();
+    assert.match(code, /^[0-9]{6}$/);
+    assert.match(requestId, /^[a-f0-9]{64}$/);
+    const redemption = { code, requestId };
+    assert.equal((await pairing("redeem", redemption)).status, 409);
+    assert.equal((await pairing("approve", { code })).status, 401);
+    assert.equal((await pairing("approve", { code }, { ...https, ...machineKey })).status, 200);
+    assert.equal((await pairing("redeem", { code })).status, 404);
+    assert.equal((await pairing("redeem", { ...redemption, code: code === "000000" ? "111111" : "000000" })).status, 400);
+    const redeemed = await pairing("redeem", redemption);
+    assert.equal(redeemed.status, 200);
+    const { receipt } = await redeemed.json();
+    assert.equal((await pairing("redeem", redemption)).status, 404);
+    const receiptHeaders = { ...https, "X-Phone-Approval": receipt };
+    const phoneLogin = await login("demo@example.test", receiptHeaders);
+    const phoneCookie = phoneLogin.headers.get("set-cookie").split(";")[0];
+    assert.match(phoneCookie, /^paperbriqOperator=[a-f0-9]{64}$/);
+    assert.equal((await controlStatus({ ...https, Cookie: phoneCookie })).operatorAuthorized, true);
+    assert.match((await login("staff@example.test", receiptHeaders)).headers.get("set-cookie"), /Max-Age=0/);
+    const expired = await (await pairing("request", {})).json();
+    try {
+      Date.now = () => originalNow() + 5 * 60 * 1000 + 1000;
+      assert.equal((await pairing("approve", { code: expired.code }, { ...https, ...machineKey })).status, 404);
+      assert.equal((await pairing("redeem", expired)).status, 404);
+    } finally {
+      Date.now = originalNow;
+    }
     assert.match((await login("demo@example.test", https)).headers.get("set-cookie"), /Max-Age=0/);
     assert.match((await login("demo@example.test", machineKey)).headers.get("set-cookie"), /Max-Age=0/);
     assert.match((await login("staff@example.test", { ...https, ...machineKey })).headers.get("set-cookie"), /Max-Age=0/);
@@ -95,6 +128,7 @@ test("machine sign-in requires an approved active operator and stays scoped to o
     assert.notEqual(first, second);
     assert.equal((await controlStatus({ ...https, Cookie: second })).operatorAuthorized, true);
     process.env.CONTROL_API_KEY = "rotated-machine-test-key";
+    assert.match((await login("demo@example.test", receiptHeaders)).headers.get("set-cookie"), /Max-Age=0/);
     assert.equal((await stop({ ...https, Cookie: second })).status, 401);
   } finally {
     await new Promise((resolve) => server.close(resolve));

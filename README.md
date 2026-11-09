@@ -157,14 +157,20 @@ those accounts. Operators sign in over HTTPS, and the server grants a machine
 session for `paperbriq-esp32` for up to eight hours. Sessions are held in one
 server process and expire on restart. Android keeps its machine session in
 memory, so a restored app profile needs a fresh sign-in for machine access.
-For a single-phone thesis setup in demo mode, set `CONTROL_API_KEY` on the
-backend and sign in to Android as the demo admin. Open **Menu → Machine access**
-and enter the phone approval key once. The app verifies it over HTTPS and stores
-it on that phone with Android Keystore encryption. Sign in again to get a new
-temporary key. Each approved demo sign-in replaces the prior demo session.
-**Machine access** displays a six-digit reference code for that sign-in.
-Use **Forget phone** to clear the approval and sign out. No approved-account
-list is needed for this setup.
+For the single-phone thesis setup in demo mode, keep `CONTROL_API_KEY` and
+`REMOTE_CONTROL_ENABLED=true` on Render. In Android, sign in as the demo admin
+and open **Menu → Machine access → Request machine key**. Tap **Copy machine key**
+to share the six digits with the machine administrator.
+
+The administrator runs `./scripts/approve-machine-phone.ps1` in PowerShell from
+the project folder. Enter the six digits and the Render secret when prompted.
+Then paste the six digits into the phone's approval box and tap **Approve phone**
+within five minutes of requesting the key. Pending requests are held in one
+server process and expire on restart.
+
+Sign in again to use the phone's approval. Android stores the phone approval
+with Keystore encryption. Each approved demo sign-in replaces the prior demo
+session. **Forget phone** clears the approval from the phone and signs out.
 
 The ESP32 must verify Render's HTTPS certificate. Put the correct PEM root CA in `PAPERBRIQ_TLS_ROOT_CA`. `PAPERBRIQ_ALLOW_INSECURE_TLS=1` is for temporary diagnosis only and must not be used for an internet-connected machine controller.
 

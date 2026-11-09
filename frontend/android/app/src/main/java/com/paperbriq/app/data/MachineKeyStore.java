@@ -64,10 +64,6 @@ public final class MachineKeyStore {
         preferences.edit().clear().apply();
     }
 
-    public boolean hasSavedApproval() {
-        return preferences.contains("key");
-    }
-
     private SecretKey loadKey() throws Exception {
         KeyStore store = KeyStore.getInstance(KEYSTORE);
         store.load(null);
