@@ -47,6 +47,7 @@ struct StandaloneCycle {
   Phase phase = OFF;
   uint8_t batch = 0; // 0..2: three material loads before ejection.
   bool fillOnly = false;
+  bool remote = false;
   bool repressed = false;
   bool pumpStarted = false;
   bool pumpWasOn = false;
@@ -62,7 +63,7 @@ struct StandaloneCycle {
   bool pumping() const { return phase == FORMING && pumpStarted; }
   void preheat(uint32_t now) { phase = PREHEATING; sessionAt = heatAt = now; }
   void begin() { phase = FORMING; batch = 0; repressed = pumpStarted = pumpWasOn = false; }
-  void nextBatch() { ++batch; pumpStarted = pumpWasOn = false; }
+  void nextBatch(uint8_t next) { batch = next; pumpStarted = pumpWasOn = false; }
   void startWater(uint32_t now) {
     if (phase == FORMING && !pumpStarted) { pumpStarted = true; pumpAt = now; }
   }

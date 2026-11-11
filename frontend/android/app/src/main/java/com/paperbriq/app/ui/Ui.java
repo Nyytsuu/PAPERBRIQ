@@ -194,6 +194,7 @@ public class Ui {
             .replaceAll("(?i)DHT22", "Temperature and humidity sensor")
             .replaceAll("(?i)IR sensor", "Briquette sensor")
             .replaceAll("(?i)TFT display", "Machine screen")
+            .replaceAll("(?i)\\b(?:rain)?water level\\b", "Water level")
             .replaceAll("(?i)float switch", "Water level sensor");
     }
 
@@ -392,6 +393,10 @@ public class Ui {
     }
 
     public String formatSensorValue(String name, double value, String unit) {
+        if ("Water level".equalsIgnoreCase(name)) {
+            if (value == 100 || (value == 1 && "digital".equalsIgnoreCase(unit))) return "High";
+            return value == 0 ? "Low" : "--";
+        }
         String number = formatNumber(value);
         if ("Temperature".equalsIgnoreCase(name)) return number + "\u00b0C";
         if ("Humidity".equalsIgnoreCase(name)) return number + "%";

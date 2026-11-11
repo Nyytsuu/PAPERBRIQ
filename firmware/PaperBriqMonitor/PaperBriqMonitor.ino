@@ -6,6 +6,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <SPI.h>
+#include <esp_system.h>
 #include <time.h>
 #include "secrets.h"
 #include "TimedCommands.h"
@@ -16,6 +17,7 @@
 #include <freertos/semphr.h>
 // Arduino generates function declarations before the first function body.
 enum MachineDisplayState : uint8_t;
+struct TftPageReadings;
 String productionJson;
 unsigned long productionReplyAt = 0;
 SemaphoreHandle_t unoTxMutex = nullptr;
@@ -144,6 +146,7 @@ bool healthStopClosed = false;
 bool healthEmergencyClosed = false;
 bool healthIndicatorIo = false;
 bool healthArmed = false;
+int8_t healthBatchMask = -1;
 bool healthChamberSupported = false;
 bool healthDoorClosed = false;
 bool healthFanOn = false;
@@ -160,7 +163,6 @@ const unsigned long POST_INTERVAL_MS = 5000;
 const unsigned long COMMAND_POLL_INTERVAL_MS = 2000;
 const unsigned long UNO_ACK_TIMEOUT_MS = 5000;
 const unsigned long EVENT_RETRY_INTERVAL_MS = 1000;
-const unsigned long DISPLAY_STATUS_BLINK_MS = 400;
 
 enum MachineDisplayState : uint8_t {
   DISPLAY_GETTING_READY,
@@ -172,8 +174,8 @@ enum MachineDisplayState : uint8_t {
 };
 
 MachineDisplayState machineDisplayState = DISPLAY_GETTING_READY;
-unsigned long lastDisplayStatusBlinkAt = 0;
-bool displayStatusBlinkOn = true;
+bool tftFrozen = false;
+bool tftNextPageRequested = false;
 
 String unoLine;
 String pendingDhtRequest;
@@ -426,43 +428,38 @@ uint16_t machineDisplayColor() {
   }
 }
 
-bool machineDisplayShouldBlink() {
-  return machineDisplayState == DISPLAY_GETTING_READY ||
-         machineDisplayState == DISPLAY_COMPLETE ||
-         machineDisplayState == DISPLAY_FAULT;
-}
-
 void drawMachineStatusHeader() {
   if (!PAPERBRIQ_TFT_ENABLED) return;
+  static int8_t drawnState = -1;
+  if (drawnState == machineDisplayState) return;
+  drawnState = machineDisplayState;
+
   const uint16_t color = machineDisplayColor();
-  tft.fillCircle(15, 13, 6,
-                 !machineDisplayShouldBlink() || displayStatusBlinkOn
-                     ? color
-                     : PB_CARD);
-  tft.fillRect(27, 14, 108, 9, PB_CARD);
+  tft.fillCircle(15, 13, 6, color);
+  char label[19];
+  snprintf(label, sizeof(label), "%-18s", machineDisplayLabel());
   tft.setTextSize(1);
-  tft.setTextColor(color);
+  tft.setTextColor(color, PB_CARD);
   tft.setCursor(27, 15);
-  tft.print(machineDisplayLabel());
+  tft.print(label);
 }
 
 void setMachineDisplayState(MachineDisplayState nextState) {
   machineDisplayState = nextState;
-  displayStatusBlinkOn = true;
-  lastDisplayStatusBlinkAt = millis();
-  drawMachineStatusHeader();
 }
 
-void serviceMachineDisplayStatus() {
-  if (!machineDisplayShouldBlink()) return;
-  const unsigned long now = millis();
-  if (now - lastDisplayStatusBlinkAt < DISPLAY_STATUS_BLINK_MS) return;
-  lastDisplayStatusBlinkAt = now;
-  displayStatusBlinkOn = !displayStatusBlinkOn;
+void serviceDisplayHeader() {
+  if (!PAPERBRIQ_TFT_ENABLED) return;
   drawMachineStatusHeader();
+  static int8_t drawnWifi = -1;
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  if (drawnWifi != connected) {
+    tft.fillCircle(143, 13, 3, connected ? PB_GREEN : PB_RED);
+    drawnWifi = connected;
+  }
 }
 
-void drawStaticDashboard() {
+void drawDashboardHeader() {
   if (!PAPERBRIQ_TFT_ENABLED) return;
   tft.fillScreen(PB_BG);
   tft.fillRoundRect(4, 3, 152, 21, 5, PB_CARD);
@@ -471,49 +468,128 @@ void drawStaticDashboard() {
   tft.setCursor(27, 7);
   tft.print("PAPERBRIQ");
   drawMachineStatusHeader();
-
-  tft.fillRoundRect(4, 28, 74, 51, 5, PB_CARD);
-  tft.fillRoundRect(82, 28, 74, 51, 5, PB_CARD);
-  tft.fillRoundRect(4, 83, 74, 38, 5, PB_CARD);
-  tft.fillRoundRect(82, 83, 74, 38, 5, PB_CARD);
-  tft.setTextColor(PB_GRAY);
-  tft.setCursor(10, 33); tft.print("TEMPERATURE");
-  tft.setCursor(88, 33); tft.print("HUMIDITY");
-  tft.setCursor(10, 88); tft.print("BRIQUETTE");
-  tft.setCursor(88, 88); tft.print("WATER LEVEL");
-
-  tft.drawRoundRect(12, 49, 6, 17, 3, PB_ORANGE);
-  tft.fillCircle(15, 66, 5, PB_ORANGE);
-  tft.drawLine(15, 52, 15, 64, PB_ORANGE);
-  tft.fillTriangle(96, 48, 90, 58, 102, 58, PB_CYAN);
-  tft.fillCircle(96, 58, 6, PB_CYAN);
 }
 
-void drawValues(bool dhtOK, bool detected, bool waterOK) {
-  if (!PAPERBRIQ_TFT_ENABLED) return;
-  tft.fillRect(24, 48, 49, 25, PB_CARD);
-  tft.fillRect(106, 48, 46, 25, PB_CARD);
-  tft.fillRect(10, 101, 64, 15, PB_CARD);
-  tft.fillRect(88, 101, 64, 15, PB_CARD);
+constexpr uint32_t TFT_PAGE_MS = 7000;
+constexpr uint32_t TFT_READING_MS = 500;
+constexpr int16_t TFT_PAGE_Y = 28;
+constexpr int16_t TFT_PAGE_HEIGHT = 96;
+constexpr int16_t TFT_STRIP_WIDTH = 19;
+constexpr uint8_t TFT_STRIP_COUNT = 8;
+constexpr uint8_t TFT_PAGE_COUNT = 2;
+constexpr uint8_t TFT_ROW_COUNT = 3;
 
-  tft.setTextSize(2);
-  tft.setTextColor(dhtOK ? PB_WHITE : PB_RED);
-  tft.setCursor(25, 53);
-  if (dhtOK) { tft.print(lastTemp, 1); tft.setTextSize(1); tft.print(" C"); }
-  else { tft.setTextSize(1); tft.print("ERROR"); }
+struct TftPageReadings {
+  char text[TFT_ROW_COUNT][11];
+  uint16_t color[TFT_ROW_COUNT];
+};
 
-  tft.setTextSize(2);
-  tft.setTextColor(dhtOK ? PB_CYAN : PB_RED);
-  tft.setCursor(112, 53);
-  if (dhtOK) { tft.print(lastHumidity, 1); tft.setTextSize(1); tft.print("%"); }
-  else { tft.setTextSize(1); tft.print("ERROR"); }
+void readTftPage(uint8_t page, TftPageReadings &readings) {
+  if (page == 0) {
+    const bool dhtOK = haveDhtReading && millis() - lastSampleAt < 10000UL;
+    if (dhtOK) {
+      // The built-in GFX font uses code page 437 for the degree symbol.
+      snprintf(readings.text[0], sizeof(readings.text[0]), "%.1f %cC", lastTemp, 248);
+      snprintf(readings.text[1], sizeof(readings.text[1]), "%.1f%%", lastHumidity);
+    } else {
+      strcpy(readings.text[0], "--");
+      strcpy(readings.text[1], "--");
+    }
+    readings.color[0] = dhtOK ? PB_WHITE : PB_GRAY;
+    readings.color[1] = dhtOK ? PB_CYAN : PB_GRAY;
+    const bool waterHigh = digitalRead(FLOAT_PIN) == LOW;
+    strcpy(readings.text[2], waterHigh ? "HIGH" : "LOW");
+    readings.color[2] = waterHigh ? PB_CYAN : PB_RED;
+  } else {
+    bool inlet, outlet;
+    const bool fresh = readPaperInputs(inlet, outlet);
+    const bool detected[] = {inlet, outlet, digitalRead(IR_PIN) == IR_DETECTED};
+    for (uint8_t row = 0; row < TFT_ROW_COUNT; ++row) {
+      const bool available = row == 2 || fresh;
+      const char *state = detected[row] ? "DETECTED" : "CLEAR";
+      strcpy(readings.text[row], available ? state : "--");
+      readings.color[row] = available && detected[row] ? PB_GREEN : PB_GRAY;
+    }
+  }
+}
 
-  tft.setTextSize(1);
-  tft.setTextColor(detected ? PB_GREEN : PB_GRAY);
-  tft.setCursor(10, 105); tft.print(detected ? "DETECTED" : "WAITING");
-  tft.setTextColor(waterOK ? PB_CYAN : PB_RED);
-  tft.setCursor(91, 105); tft.print(waterOK ? "NORMAL" : "LOW");
-  tft.fillCircle(143, 13, 3, WiFi.status() == WL_CONNECTED ? PB_GREEN : PB_RED);
+int16_t tftRowY(uint8_t row) {
+  return 40 + 22 * row;
+}
+
+void drawTftReading(Adafruit_GFX &target, int16_t originX, int16_t originY,
+                    uint8_t row, const TftPageReadings &readings) {
+  char padded[11];
+  snprintf(padded, sizeof(padded), "%10s", readings.text[row]);
+  target.setTextSize(1);
+  target.setTextColor(readings.color[row], PB_CARD);
+  target.setCursor(88 - originX, tftRowY(row) + 6 - originY);
+  target.print(padded);
+}
+
+void drawTftPageStrip(GFXcanvas16 &strip, uint8_t page, uint8_t index,
+                      const TftPageReadings &readings) {
+  static const char *const titles[TFT_PAGE_COUNT] = {"CHAMBER / WATER", "PAPER SENSORS"};
+  static const char *const labels[TFT_PAGE_COUNT][TFT_ROW_COUNT] = {
+    {"Temperature", "Humidity", "Water level"},
+    {"Shredder in", "Shredder out", "Briquette"}
+  };
+  const int16_t x = 4 + index * TFT_STRIP_WIDTH;
+  strip.fillScreen(PB_BG);
+  strip.cp437(true);
+  strip.setTextWrap(false);
+  strip.setTextSize(1);
+  strip.setTextColor(PB_CYAN);
+  strip.setCursor(11 - x, 1);
+  strip.print(titles[page]);
+  for (uint8_t row = 0; row < TFT_ROW_COUNT; ++row) {
+    const int16_t y = tftRowY(row) - TFT_PAGE_Y;
+    strip.fillRoundRect(4 - x, y, TFT_STRIP_WIDTH * TFT_STRIP_COUNT, 20, 4, PB_CARD);
+    strip.setTextColor(PB_GRAY);
+    strip.setCursor(11 - x, y + 6);
+    strip.print(labels[page][row]);
+    drawTftReading(strip, x, TFT_PAGE_Y, row, readings);
+  }
+  strip.fillCircle(73 - x, 87, 2, page == 0 ? PB_CYAN : PB_GRAY);
+  strip.fillCircle(87 - x, 87, 2, page == 1 ? PB_CYAN : PB_GRAY);
+  tft.drawRGBBitmap(x, TFT_PAGE_Y, strip.getBuffer(), strip.width(), strip.height());
+}
+
+// Draw one strip per loop so UART input can be serviced during the slide.
+bool serviceTft() {
+  if (!PAPERBRIQ_TFT_ENABLED || tftFrozen) return false;
+  serviceDisplayHeader();
+  static GFXcanvas16 strip(TFT_STRIP_WIDTH, TFT_PAGE_HEIGHT);
+  if (!strip.getBuffer()) return false;
+
+  static TftPageReadings shown;
+  static uint8_t page = 0, nextStrip = 0;
+  static uint32_t pageSince = 0, lastReadingAt = 0;
+  const uint32_t now = millis();
+  if (nextStrip == TFT_STRIP_COUNT &&
+      (tftNextPageRequested || now - pageSince >= TFT_PAGE_MS)) {
+    page = (page + 1) % TFT_PAGE_COUNT;
+    nextStrip = 0;
+    tftNextPageRequested = false;
+  }
+  if (nextStrip < TFT_STRIP_COUNT) {
+    if (nextStrip == 0) readTftPage(page, shown);
+    drawTftPageStrip(strip, page, nextStrip++, shown);
+    if (nextStrip == TFT_STRIP_COUNT) pageSince = lastReadingAt = millis();
+    return nextStrip < TFT_STRIP_COUNT;
+  }
+  if (now - lastReadingAt >= TFT_READING_MS) {
+    lastReadingAt = now;
+    TftPageReadings readings{};
+    readTftPage(page, readings);
+    for (uint8_t row = 0; row < TFT_ROW_COUNT; ++row) {
+      if (strcmp(readings.text[row], shown.text[row]) || readings.color[row] != shown.color[row]) {
+        drawTftReading(tft, 0, 0, row, readings);
+      }
+    }
+    shown = readings;
+  }
+  return false;
 }
 
 void postTelemetry(bool dhtOK, bool detected, bool waterOK) {
@@ -546,6 +622,8 @@ void postTelemetry(bool dhtOK, bool detected, bool waterOK) {
   payload += ",\"emergencyClosed\":" + String(linkFresh && healthEmergencyClosed ? "true" : "false");
   payload += ",\"indicatorIo\":" + String(linkFresh && healthIndicatorIo ? "true" : "false");
   payload += ",\"armed\":" + String(linkFresh && healthArmed ? "true" : "false");
+  if (linkFresh && healthBatchMask >= 0)
+    payload += ",\"batchMask\":" + String(healthBatchMask);
   payload += ",\"doorClosed\":" + String(linkFresh && healthDoorClosed ? "true" : "false");
   payload += ",\"fanOn\":" + String(linkFresh && healthFanOn ? "true" : "false");
   payload += ",\"unlockOn\":" + String(linkFresh && healthUnlockOn ? "true" : "false");
@@ -663,14 +741,19 @@ void cacheFinalCommand(const String &id, const String &status,
   lastCommandMessage = message;
 }
 
+bool isBatchCommand(const String &action) {
+  return action.length() == 7 && action.startsWith("batch_") && action[6] >= '1' && action[6] <= '3';
+}
+
 void dispatchCommand(const String &id, String action) {
   action.toLowerCase();
   String timedAction = action; timedAction.toUpperCase();
   const bool timed = timedCommandSeconds(timedAction.c_str()) > 0;
+  const bool batch = isBatchCommand(action);
   char kind; bool edit; uint32_t run, duration;
   const bool productionCommand = parseProductionCommand(timedAction.c_str(), kind, edit, run, duration);
   if (!isSafeCommandId(id) ||
-      (action != "start" && action != "stop" && action != "reset" && action != "self_test" && !timed && !productionCommand)) {
+      (action != "start" && action != "stop" && action != "reset" && action != "self_test" && !batch && !timed && !productionCommand)) {
     postCommandAck(id, "failed", "unsupported command");
     cacheFinalCommand(id, "failed", "unsupported command");
     enqueueDeviceEvent("command_rejected", "warning", "controller", "stopped",
@@ -687,7 +770,7 @@ void dispatchCommand(const String &id, String action) {
   } else if (action == "stop") {
     setMachineDisplayState(DISPLAY_STOPPED);
   }
-  String protocolAction = action;
+  String protocolAction = batch ? "B" + action.substring(6) : action;
   protocolAction.toUpperCase();
   sendUnoFrame("CMD|" + id + "|" + protocolAction);
   Serial.print("Sent command to Uno: ");
@@ -785,6 +868,9 @@ void handleUnoEvent(const String &line) {
   String processState = fields[3];
   processState.toLowerCase();
 
+  if (eventType == "PROCESS_STARTED" && isBatchCommand(pendingCommandAction)) {
+    processCommandId = pendingCommandId;
+  }
 
   if (eventType == "FAULT" || severity == "error" ||
       severity == "critical") {
@@ -821,10 +907,12 @@ void handleUnoHealth(const String &line) {
       line.substring(7, separator) != healthProbeId ||
       millis() - lastHealthProbeAt > HEALTH_REPLY_TIMEOUT_MS) return;
   const String flags = line.substring(separator + 1);
-  if (flags.length() != 9 && flags.length() != 17 && flags.length() != 27) return;
+  if (flags.length() != 9 && flags.length() != 17 && flags.length() != 27 && flags.length() != 29) return;
   for (uint8_t i = 0; i < flags.length(); ++i) {
-    if (i % 2 == 1 ? flags[i] != '|' : (flags[i] != '0' && flags[i] != '1')) return;
+    const char maximum = i == 28 ? '7' : '1';
+    if (i % 2 == 1 ? flags[i] != '|' : (flags[i] < '0' || flags[i] > maximum)) return;
   }
+  healthBatchMask = flags.length() == 29 ? flags[28] - '0' : -1;
   healthControlIo = flags[0] == '1';
   healthStopClosed = flags[2] == '1';
   healthEmergencyClosed = flags[4] == '1';
@@ -835,7 +923,7 @@ void handleUnoHealth(const String &line) {
   healthFanOn = healthChamberSupported && flags[12] == '1';
   healthUnlockOn = healthChamberSupported && flags[14] == '1';
   healthTestActive = healthChamberSupported && flags[16] == '1';
-  healthTimedVersion = flags.length() == 27;
+  healthTimedVersion = flags.length() >= 27;
   healthTimedSupported = healthTimedVersion && flags[18] == '1';
   healthHeaterOn = healthTimedVersion && flags[20] == '1';
   healthPumpOn = healthTimedVersion && flags[22] == '1';
@@ -913,7 +1001,12 @@ void printChamberSensor() {
 void serviceSensorSerial() {
   while (Serial.available() > 0) {
     const char c = Serial.read();
-    if (c == 's' || c == 'S') {
+    if (PAPERBRIQ_TFT_ENABLED && c == '>') {
+      tftNextPageRequested = true;
+    } else if (PAPERBRIQ_TFT_ENABLED && c == '~') {
+      tftFrozen = !tftFrozen;
+      Serial.println(tftFrozen ? "TFT frozen; Wi-Fi and Uno link still active" : "TFT updates resumed");
+    } else if (c == 's' || c == 'S') {
       sampleChamberSensor();
       printChamberSensor();
       bool inlet, outlet;
@@ -1008,24 +1101,25 @@ void setup() {
   delay(300);
   Serial.println();
   Serial.println("PaperBriq monitor starting - automatic Wi-Fi and app connection");
-  Serial.println("Firmware: ir-in-out-v9 | DHT22 GPIO27 | USB S and Uno S supported");
+  Serial.println("Firmware: sensor-pages-v10 | USB S: sensors, >: next page, ~: freeze TFT");
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  if (resetReason == ESP_RST_BROWNOUT) Serial.println("ESP32 reset reason: brownout");
+  else Serial.printf("ESP32 reset reason: %d\n", static_cast<int>(resetReason));
 
   if (PAPERBRIQ_TFT_ENABLED) {
-  // Match the working TFT-only test before initializing other peripherals.
-  pinMode(TFT_CS, OUTPUT);
-  digitalWrite(TFT_CS, HIGH);
-  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
-  Serial.println("Initializing TFT");
-  tft.initR(INITR_BLACKTAB);
-  // Keep the conservative drawing speed used during TFT troubleshooting.
-  tft.setSPISpeed(1000000);
-  // Flip the previous landscape rotation (1) by 180 degrees.
-  tft.setRotation(3);
-  Serial.print("TFT drawing SPI: 1 MHz; rotation: ");
-  Serial.println(tft.getRotation());
-  tft.setTextWrap(false);
-  drawStaticDashboard();
-  Serial.println("TFT dashboard draw complete");
+    pinMode(TFT_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
+    SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
+    Serial.println("Initializing TFT");
+    tft.initR(INITR_BLACKTAB);
+    tft.setSPISpeed(1000000);
+    tft.setRotation(1);
+    Serial.print("TFT drawing SPI: 1 MHz; rotation: ");
+    Serial.println(tft.getRotation());
+    tft.setTextWrap(false);
+    tft.cp437(true);
+    drawDashboardHeader();
+    Serial.println("TFT dashboard draw complete");
   } else {
     Serial.println("TFT disabled; chamber DHT22 and app telemetry remain active");
   }
@@ -1056,10 +1150,10 @@ void loop() {
   sampleChamberSensor();
   serviceSensorSerial();
   serviceUnoLink();
-  serviceMachineDisplayStatus();
   // Keep reading UART until the final ACK or the existing 5-second deadline.
   // No Wi-Fi reconnect, telemetry, or event upload may consume that window.
   if (pendingCommandId.length() > 0) { delay(1); return; }
+  if (serviceTft()) return;
   const unsigned long now = millis();
   if (WiFi.status() != WL_CONNECTED) connectWifi();
   sampleChamberSensor();
@@ -1086,10 +1180,8 @@ void loop() {
     const bool dhtOK = haveDhtReading && telemetryNow - lastSampleAt < 10000UL;
     const bool detected = digitalRead(IR_PIN) == IR_DETECTED;
     const bool waterOK = digitalRead(FLOAT_PIN) == LOW;
-    drawValues(dhtOK, detected, waterOK);
     postTelemetry(dhtOK, detected, waterOK);
   }
   serviceUnoLink();
-  serviceMachineDisplayStatus();
   serviceHealthProbe();
 }

@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS device_production_settings (
 CREATE TABLE IF NOT EXISTS device_commands (
   id UUID PRIMARY KEY,
   device_id VARCHAR(80) NOT NULL,
-  command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT):[0-9A-F]{8}:[1-9][0-9]{0,6}$'),
+  command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^batch_[1-3]$' OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT):[0-9A-F]{8}:[1-9][0-9]{0,6}$'),
   status VARCHAR(20) NOT NULL DEFAULT 'queued'
     CHECK (status IN ('queued', 'delivered', 'completed', 'failed', 'expired')),
   idempotency_key VARCHAR(120),

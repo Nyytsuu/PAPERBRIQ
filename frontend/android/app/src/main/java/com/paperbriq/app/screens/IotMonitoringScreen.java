@@ -12,6 +12,7 @@ import com.paperbriq.app.ui.Ui;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
+import java.util.Locale;
 
 public class IotMonitoringScreen implements AppScreen {
     @Override public String key() { return "iot"; }
@@ -51,31 +52,44 @@ public class IotMonitoringScreen implements AppScreen {
         ArrayList<View> views = new ArrayList<>();
         for (int index = 0; index < sensors.length(); index++) {
             JSONObject sensor = sensors.optJSONObject(index);
-            if (sensor == null) sensor = new JSONObject();
+            if (sensor == null) continue;
+            String name = sensor.optString("name", "Sensor");
+            if (isRetiredSensor(name)) continue;
+            String label = ui.equipmentLabel(name);
+            boolean waterLevel = "Water level".equals(label);
             boolean trusted = "esp32".equalsIgnoreCase(sensor.optString("source", "")) || databaseConfigured;
             boolean hasValue = trusted && sensor.has("value") && !sensor.isNull("value");
-            String name = sensor.optString("name", "Sensor");
-            // Older deployed servers can still return these retired fields.
-            if ("Battery Level".equalsIgnoreCase(name) || "TDS Water Quality".equalsIgnoreCase(name)
-                || "Water Quality".equalsIgnoreCase(name)) continue;
             boolean chamberSensor = "Temperature".equalsIgnoreCase(name) || "Humidity".equalsIgnoreCase(name);
             if (chamberSensor && !"passed".equals(dhtStatus)) hasValue = false;
-            String value = hasValue ? ui.formatSensorValue(name, sensor.optDouble("value"), sensor.optString("unit", "")) : "--";
             boolean paperSensor = "Shredder Inlet".equalsIgnoreCase(name) || "Shredder Outlet".equalsIgnoreCase(name);
-            if (paperSensor && "Offline".equalsIgnoreCase(sensor.optString("status"))) hasValue = false;
+            if ((paperSensor || waterLevel) && "Offline".equalsIgnoreCase(sensor.optString("status"))) hasValue = false;
+            String value = hasValue ? ui.formatSensorValue(label, sensor.optDouble("value"), sensor.optString("unit", "")) : "--";
             if (hasValue && ("IR Sensor".equalsIgnoreCase(name) || paperSensor)) value = sensor.optDouble("value") > 0 ? "Detected" : "Clear";
-            if (!hasValue) value = "--";
+            if (waterLevel && "--".equals(value)) hasValue = false;
             String status = hasValue ? sensor.optString("status", "") : "Waiting for reading";
             if (chamberSensor) status = hasValue ? "Drying chamber" : "attention".equals(dhtStatus) ? "Sensor not responding" : "Waiting for fresh reading";
-            if (!hasValue && "Water Flow Rate".equalsIgnoreCase(name)) status = "Flow sensor needed";
-            if (!hasValue && "System Pressure".equalsIgnoreCase(name)) status = "Pressure sensor needed";
-            if (!hasValue && "Power Output".equalsIgnoreCase(name)) status = "Power meter needed";
             if (paperSensor && hasValue) status = "Shredder Inlet".equalsIgnoreCase(name) ? "Paper entering" : "Paper leaving";
-            String label = "Power Output".equalsIgnoreCase(name) ? "Power use" : ui.equipmentLabel(name);
+            boolean attention = !hasValue || "Warning".equalsIgnoreCase(status) || (waterLevel && "Low".equals(value));
+            if (waterLevel && hasValue) status = "";
             views.add(ui.readingCard(label, value.trim(), status,
-                !hasValue || "Warning".equalsIgnoreCase(status) ? AppColors.RED : AppColors.GREEN));
+                attention ? AppColors.RED : AppColors.GREEN));
         }
         return views.toArray(new View[0]);
+    }
+
+    private boolean isRetiredSensor(String name) {
+        switch (name.trim().toLowerCase(Locale.ROOT)) {
+            case "battery level":
+            case "tds water quality":
+            case "water quality":
+            case "power output":
+            case "power use":
+            case "water flow rate":
+            case "system pressure":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private void showEquipment(AppController controller, JSONObject iot, boolean online) {
@@ -101,8 +115,10 @@ public class IotMonitoringScreen implements AppScreen {
         for (int index = 0; index < alerts.length(); index++) {
             JSONObject alert = alerts.optJSONObject(index);
             if (alert == null) alert = new JSONObject();
-            rows[index][0] = ui.equipmentLabel(alert.optString("title", "Alert"));
-            rows[index][1] = ui.equipmentLabel(alert.optString("message", ""));
+            String title = alert.optString("title", "Alert");
+            boolean lowWater = "Rainwater Level Dropping".equalsIgnoreCase(title) || "Low Rainwater Level".equalsIgnoreCase(title);
+            rows[index][0] = lowWater ? "Water level low" : ui.equipmentLabel(title);
+            rows[index][1] = lowWater ? "Check the water tank." : ui.equipmentLabel(alert.optString("message", ""));
         }
         return rows;
     }

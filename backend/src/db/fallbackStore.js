@@ -4,6 +4,7 @@ const { fallbackSummary, fallbackUsers } = require("../data/fallbackData");
 const { createLiveDashboardSnapshot, createLiveSummarySnapshot } = require("../data/liveDashboard");
 const { createLiveIotSnapshot } = require("../data/liveIot");
 const { createLiveReportsSnapshot } = require("../data/liveReports");
+const { MANILA_OFFSET_SECONDS, DAY_SECONDS } = require("../data/monthlyReports");
 const { pageData } = require("../data/pageData");
 const {
   canAcknowledge,
@@ -399,6 +400,17 @@ function createFallbackStore() {
         status: "redeemed",
         created_at: new Date().toISOString()
       };
+    },
+    async getMonthlyBatchRecords({ fromSeconds, toSeconds }) {
+      const counts = new Map();
+      for (const event of deviceEvents) {
+        if (event.type !== "batch_completed" || !event.eventKey) continue;
+        const received = Date.parse(event.createdAt) / 1000;
+        if (received < fromSeconds || received >= toSeconds) continue;
+        const day = Math.floor((received + MANILA_OFFSET_SECONDS) / DAY_SECONDS);
+        counts.set(day, (counts.get(day) || 0) + 1);
+      }
+      return Array.from(counts, ([report_day, amount]) => ({ report_day, metric: "batches", amount }));
     },
     async getReports() {
       return createLiveReportsSnapshot(pageData.reports, createLiveSummarySnapshot(fallbackSummary));

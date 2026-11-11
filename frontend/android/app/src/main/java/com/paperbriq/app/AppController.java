@@ -556,33 +556,36 @@ public class AppController {
     }
 
     private void showDemoMachineKeyDialog() {
+        LinearLayout actions = ui.column();
+        actions.setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(16));
+        Button request = ui.greenButton("Request machine key");
+        Button cancel = ui.outlineButton("Cancel");
+        actions.addView(request, ui.fullWidth(ui.dp(48), 0, 0, 0, 0));
+        actions.addView(cancel, ui.fullWidth(ui.dp(48), 0, ui.dp(12), 0, 0));
+
         AlertDialog dialog = new AlertDialog.Builder(activity)
             .setTitle("Machine access")
             .setMessage("Request a six-digit machine key to approve this phone.")
-            .setPositiveButton("Request machine key", null)
-            .setNegativeButton("Cancel", null)
+            .setView(actions)
             .create();
-        dialog.setOnShowListener(ignored -> {
-            styleDialogButtons(dialog);
-            Button request = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-            request.setOnClickListener(view -> {
-                request.setEnabled(false);
-                executor.execute(() -> {
-                    try {
-                        JSONObject key = apiClient.requestMachineKey();
-                        activity.runOnUiThread(() -> {
-                            if (!dialog.isShowing() || !usesMachineKeySetup()) return;
-                            dialog.dismiss();
-                            showMachineKeyApproval(key.optString("requestId"), key.optString("code"));
-                        });
-                    } catch (Exception error) {
-                        activity.runOnUiThread(() -> {
-                            if (!dialog.isShowing()) return;
-                            dialog.setMessage(error.getMessage());
-                            request.setEnabled(true);
-                        });
-                    }
-                });
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        request.setOnClickListener(view -> {
+            request.setEnabled(false);
+            executor.execute(() -> {
+                try {
+                    JSONObject key = apiClient.requestMachineKey();
+                    activity.runOnUiThread(() -> {
+                        if (!dialog.isShowing() || !usesMachineKeySetup()) return;
+                        dialog.dismiss();
+                        showMachineKeyApproval(key.optString("requestId"), key.optString("code"));
+                    });
+                } catch (Exception error) {
+                    activity.runOnUiThread(() -> {
+                        if (!dialog.isShowing()) return;
+                        dialog.setMessage(error.getMessage());
+                        request.setEnabled(true);
+                    });
+                }
             });
         });
         dialog.show();
@@ -591,7 +594,7 @@ public class AppController {
     private void showMachineKeyApproval(String requestId, String code) {
         boolean privateAdmin = isPrivateMachineAdmin();
         LinearLayout form = ui.column();
-        form.setPadding(ui.dp(20), 0, ui.dp(20), 0);
+        form.setPadding(ui.dp(20), 0, ui.dp(20), ui.dp(16));
         TextView display = ui.text(code, 28, AppColors.INK, Typeface.BOLD);
         display.setTypeface(Typeface.MONOSPACE);
         form.addView(display, ui.matchWrap());
@@ -606,52 +609,64 @@ public class AppController {
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
         input.setFilters(new InputFilter[] { new InputFilter.LengthFilter(6) });
         form.addView(input, ui.fullWidth(ui.dp(52), 0, ui.dp(8), 0, 0));
+
+        TextView requestNew = ui.text("Request new key", 14, AppColors.GREEN, Typeface.BOLD);
+        requestNew.setGravity(Gravity.CENTER_VERTICAL);
+        requestNew.setMinHeight(ui.dp(48));
+        requestNew.setFocusable(true);
+        form.addView(requestNew, ui.matchWrap());
+
+        Button approve = ui.greenButton("Approve phone");
+        Button cancel = ui.outlineButton("Cancel");
+        form.addView(approve, ui.fullWidth(ui.dp(48), 0, ui.dp(4), 0, 0));
+        form.addView(cancel, ui.fullWidth(ui.dp(48), 0, ui.dp(12), 0, 0));
+
+        ScrollView scroll = new ScrollView(activity);
+        scroll.addView(form, ui.matchWrap());
         AlertDialog dialog = new AlertDialog.Builder(activity)
             .setTitle("Approve this phone")
             .setMessage(privateAdmin
                 ? "Copy and paste this six-digit key below within five minutes."
                 : "Give this key to the machine administrator. After they approve it, paste it below within five minutes.")
-            .setView(form)
-            .setPositiveButton("Approve phone", null)
-            .setNeutralButton("Request new key", (ignored, which) -> showDemoMachineKeyDialog())
-            .setNegativeButton("Cancel", null)
+            .setView(scroll)
             .create();
-        dialog.setOnShowListener(ignored -> {
-            styleDialogButtons(dialog);
-            Button approve = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-            approve.setOnClickListener(view -> {
-                String enteredCode = input.getText().toString();
-                if (!enteredCode.matches("[0-9]{6}")) {
-                    input.setError("Paste the six-digit machine key.");
-                    return;
+        requestNew.setOnClickListener(view -> {
+            dialog.dismiss();
+            showDemoMachineKeyDialog();
+        });
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        approve.setOnClickListener(view -> {
+            String enteredCode = input.getText().toString();
+            if (!enteredCode.matches("[0-9]{6}")) {
+                input.setError("Paste the six-digit machine key.");
+                return;
+            }
+            approve.setEnabled(false);
+            requestNew.setEnabled(false);
+            cancel.setEnabled(false);
+            dialog.setCancelable(false);
+            executor.execute(() -> {
+                try {
+                    String receipt = apiClient.approvePhone(requestId, enteredCode, privateAdmin);
+                    if (receipt != null) machineKeyStore.save(apiClient.machineKeyOrigin(), receipt);
+                    activity.runOnUiThread(() -> {
+                        dialog.dismiss();
+                        if (privateAdmin && isPrivateMachineAdmin()) {
+                            loadPagePayload(session.currentPage, true);
+                            showInfoDialog("Phone approved", "Machine access is active for this sign-in.");
+                        } else if (isDemoAdmin()) {
+                            confirmAction("Phone approved", "Sign in again to activate machine access.", this::logout);
+                        }
+                    });
+                } catch (Exception error) {
+                    activity.runOnUiThread(() -> {
+                        input.setError(error.getMessage());
+                        approve.setEnabled(true);
+                        requestNew.setEnabled(true);
+                        cancel.setEnabled(true);
+                        dialog.setCancelable(true);
+                    });
                 }
-                approve.setEnabled(false);
-                dialog.setCancelable(false);
-                dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(false);
-                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
-                executor.execute(() -> {
-                    try {
-                        String receipt = apiClient.approvePhone(requestId, enteredCode, privateAdmin);
-                        if (receipt != null) machineKeyStore.save(apiClient.machineKeyOrigin(), receipt);
-                        activity.runOnUiThread(() -> {
-                            dialog.dismiss();
-                            if (privateAdmin && isPrivateMachineAdmin()) {
-                                loadPagePayload(session.currentPage, true);
-                                showInfoDialog("Phone approved", "Machine access is active for this sign-in.");
-                            } else if (isDemoAdmin()) {
-                                confirmAction("Phone approved", "Sign in again to activate machine access.", this::logout);
-                            }
-                        });
-                    } catch (Exception error) {
-                        activity.runOnUiThread(() -> {
-                            input.setError(error.getMessage());
-                            approve.setEnabled(true);
-                            dialog.setCancelable(true);
-                            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(true);
-                            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(true);
-                        });
-                    }
-                });
             });
         });
         dialog.show();
@@ -696,15 +711,20 @@ public class AppController {
         sendDeviceCommand(action, seconds, runId);
     }
 
+    public void selectFormingBatch(int batch) {
+        if (batch >= 1 && batch <= 3) sendDeviceCommand("batch_" + batch);
+    }
+
     private void sendDeviceCommand(String command, int durationSeconds) {
         sendDeviceCommand(command, durationSeconds, "");
     }
 
     private void sendDeviceCommand(String command, int durationSeconds, String runId) {
         String normalized = String.valueOf(command).trim().toLowerCase(Locale.ROOT);
-        boolean production = "pump_arm".equals(normalized) || "drying_start".equals(normalized)
+        boolean production = "drying_start".equals(normalized)
             || "drying_time".equals(normalized) || "preheat_start".equals(normalized);
         boolean timed = "heater".equals(normalized) || "pump".equals(normalized);
+        boolean batchCommand = normalized.matches("batch_[1-3]");
         if (timed && (durationSeconds < 1 || durationSeconds > ("heater".equals(normalized) ? 10 : 3))) {
             Toast.makeText(activity, "Choose heater 1–10 seconds or pump 1–3 seconds.", Toast.LENGTH_LONG).show(); return;
         }
@@ -712,7 +732,7 @@ public class AppController {
             Toast.makeText(activity, "Only administrators and barangay staff can control the machine.", Toast.LENGTH_LONG).show();
             return;
         }
-        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized) || "self_test".equals(normalized) || timed || production)) {
+        if (!("start".equals(normalized) || "stop".equals(normalized) || "reset".equals(normalized) || "self_test".equals(normalized) || timed || production || batchCommand)) {
             Toast.makeText(activity, "Unsupported machine command.", Toast.LENGTH_LONG).show();
             return;
         }
@@ -757,8 +777,9 @@ public class AppController {
                 JSONObject payload = new JSONObject();
                 payload.put("deviceId", DEVICE_ID);
                 payload.put("command", normalized);
-                if (production && !"pump_arm".equals(normalized)) { payload.put("durationSeconds", durationSeconds); payload.put("runId", runId); }
+                if (production) { payload.put("durationSeconds", durationSeconds); payload.put("runId", runId); }
                 if (timed) { payload.put("durationSeconds", durationSeconds); payload.put("supervised", true); }
+                if (batchCommand) payload.put("supervised", true);
                 if ("self_test".equals(normalized)) payload.put("unloadedSupervised", true);
                 payload.put("source", "android");
                 if (session.user != null) {
@@ -772,8 +793,9 @@ public class AppController {
                 activity.runOnUiThread(() -> {
                     commandSubmitting = false;
                     clearMachineCheck();
-                    String label = "stop".equals(normalized) ? "Software Stop" : "self_test".equals(normalized) ? "Component tests"
-                        : "pump_arm".equals(normalized) ? "Pump cycle" : "drying_start".equals(normalized) ? "Drying" : "preheat_start".equals(normalized) ? "Preheating"
+                    String label = batchCommand ? "Batch " + normalized.charAt(6)
+                        : "stop".equals(normalized) ? "Software Stop" : "self_test".equals(normalized) ? "Component tests"
+                        : "drying_start".equals(normalized) ? "Drying" : "preheat_start".equals(normalized) ? "Preheating"
                         : normalized.endsWith("_time") ? "Time change" : capitalize(normalized);
                     Toast.makeText(activity, label + " queued (" + status + "). Waiting for the device acknowledgement.", Toast.LENGTH_LONG).show();
                     loadPagePayload("process", true);

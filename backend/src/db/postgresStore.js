@@ -44,6 +44,19 @@ function createPostgresStore(databaseUrl) {
       const { rows } = await pool.query("SELECT id, role FROM app_users WHERE id = $1 AND is_active = TRUE", [id]);
       return rows[0] || null;
     },
+    async getMonthlyBatchRecords({ fromSeconds, toSeconds }) {
+      await ensureControlSchema();
+      const { rows } = await pool.query(
+        `SELECT FLOOR((EXTRACT(EPOCH FROM created_at) + ${MANILA_OFFSET_SECONDS}) / ${DAY_SECONDS}) AS report_day,
+                'batches' AS metric, COUNT(*) AS amount
+         FROM device_events
+         WHERE event_type = 'batch_completed' AND event_key IS NOT NULL
+           AND created_at >= to_timestamp($1) AND created_at < to_timestamp($2)
+         GROUP BY report_day`,
+        [fromSeconds, toSeconds]
+      );
+      return rows;
+    },
     async getMonthlyReportRecords({ fromSeconds, toSeconds }) {
       try {
         const { rows } = await pool.query(
@@ -389,7 +402,7 @@ async function ensureDeviceControlSchema(pool) {
     `CREATE TABLE IF NOT EXISTS device_commands (
        id UUID PRIMARY KEY,
        device_id VARCHAR(80) NOT NULL,
-       command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT|HH):[0-9A-F]{8}:[1-9][0-9]{0,6}$'),
+       command VARCHAR(20) NOT NULL CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^batch_[1-3]$' OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT|HH):[0-9A-F]{8}:[1-9][0-9]{0,6}$'),
        status VARCHAR(20) NOT NULL DEFAULT 'queued'
          CHECK (status IN ('queued', 'delivered', 'completed', 'failed', 'expired')),
        idempotency_key VARCHAR(120),
@@ -405,7 +418,7 @@ async function ensureDeviceControlSchema(pool) {
   await pool.query(
     `ALTER TABLE device_commands
        DROP CONSTRAINT IF EXISTS device_commands_command_check,
-       ADD CONSTRAINT device_commands_command_check CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT|HH):[0-9A-F]{8}:[1-9][0-9]{0,6}$')`
+       ADD CONSTRAINT device_commands_command_check CHECK (command IN ('start', 'stop', 'reset', 'self_test') OR command ~ '^batch_[1-3]$' OR command ~ '^(heater:([1-9]|10)|pump:[1-3])$' OR command ~ '^(PP|DD|PT|DT|HH):[0-9A-F]{8}:[1-9][0-9]{0,6}$')`
   );
   await pool.query(
     `CREATE INDEX IF NOT EXISTS idx_device_command_queue

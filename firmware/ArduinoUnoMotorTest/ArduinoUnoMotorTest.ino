@@ -63,9 +63,13 @@ void servicePumpTest();
 void startPumpTest();
 void startHeaterTest();
 bool benchConditionsReady(bool allowArmedPump = false);
+bool machineInputsReady();
 void serviceProduction();
 void serviceStandaloneCycle();
 bool startStandaloneCycle(bool fillOnly = false, uint8_t firstLoad = 0);
+uint8_t availableBatches();
+bool selectBatch(uint8_t batch);
+enum FormingMode : uint8_t { NETWORK_FORMING, DRY_FORMING, LOCAL_RECIPE, REMOTE_BATCH_RECIPE };
 void handlePaperSignal(char value);
 
 ProductionTimer production;
@@ -690,6 +694,29 @@ void emitEvent(
       severity,
       component,
       processState,
+      message);
+}
+
+static void __attribute__((noinline)) emitInfoEvent(
+    const __FlashStringHelper *type,
+    const __FlashStringHelper *component,
+    const __FlashStringHelper *processState,
+    const __FlashStringHelper *message) {
+  emitEvent(
+      type,
+      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
+      component,
+      processState,
+      message);
+}
+
+static void __attribute__((noinline)) emitFormingEvent(
+    const __FlashStringHelper *type,
+    const __FlashStringHelper *message) {
+  emitInfoEvent(
+      type,
+      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
+      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
       message);
 }
 
@@ -1376,9 +1403,8 @@ bool armMotorTest() {
   USB_LOG.println(
       F("MOTOR TEST ARMED: motor and gate commands enabled"));
 
-  emitEvent(
+  emitInfoEvent(
       F("ARMED"),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_controller),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_stopped),
       F("Armed"));
@@ -1497,7 +1523,7 @@ void startStatusSelfTest() {
 
 void printHelp() {
   Serial.println(F(
-      "PWM9/10 R/X=arm/stop W/M/G=batch/fill/dry P=ESP Z=pos\r\n"
+      "R/X=arm/stop W/M/G=batch/fill/dry P=ESP Z=pos\r\n"
       "1/2=shred 3/4=mix E/T=press F/B=push\r\n"
       "O/C/D=gate 5/6/7=molder I=door\r\n"
       "V/N=fan U/K=lock J=heat Y=pump S=DHT Q=test L=LED"));
@@ -1556,9 +1582,8 @@ void requestPulse(
   // Shredder command confirmation.
   if (motion == SHREDDER_FORWARD) {
 
-    emitEvent(
+    emitInfoEvent(
         reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_69),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
         reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_70),
         F("Forward"));
@@ -1566,9 +1591,8 @@ void requestPulse(
   } else if (motion ==
              SHREDDER_REVERSE) {
 
-    emitEvent(
+    emitInfoEvent(
         reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_69),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
         reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_70),
         F("Reverse"));
@@ -1753,9 +1777,8 @@ void startRequestedMotion() {
       activeMotion ==
           SHREDDER_REVERSE) {
 
-    emitEvent(
+    emitInfoEvent(
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_SHREDDER_STARTED),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
         activeMotion ==
@@ -1769,9 +1792,8 @@ void startRequestedMotion() {
       activeMotion ==
           MIXER_REVERSE) {
 
-    emitEvent(
+    emitInfoEvent(
         F("MIXER_STARTED"),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_mixer),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
         F("Mixer started"));
@@ -1782,9 +1804,8 @@ void startRequestedMotion() {
       activeMotion ==
           PRESSER_RETRACT) {
 
-    emitEvent(
+    emitInfoEvent(
         F("PRESSER_STARTED"),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_presser),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
         F("Presser ON"));
@@ -1795,9 +1816,8 @@ void startRequestedMotion() {
       activeMotion ==
           PUSHER_REVERSE) {
 
-    emitEvent(
+    emitInfoEvent(
         F("PUSHER_STARTED"),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_pusher),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
         F("Pusher ON"));
@@ -1854,9 +1874,8 @@ void serviceMotorState() {
         completedMotion ==
             SHREDDER_REVERSE) {
 
-      emitEvent(
+      emitInfoEvent(
           reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_86),
-          reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
           reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
           reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_stopped),
           F("Shred OFF"));
@@ -1867,9 +1886,8 @@ void serviceMotorState() {
         completedMotion ==
             MIXER_REVERSE) {
 
-      emitEvent(
+      emitInfoEvent(
           reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_88),
-          reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
           reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_mixer),
           (automaticProcessIsActive() ||
            diagnosticActive)
@@ -1883,9 +1901,8 @@ void serviceMotorState() {
         completedMotion ==
             PRESSER_RETRACT) {
 
-      emitEvent(
+      emitInfoEvent(
           F("PRESSER_COMPLETED"),
-          reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
           reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_presser),
           (automaticProcessIsActive() ||
            diagnosticActive)
@@ -1899,9 +1916,8 @@ void serviceMotorState() {
         completedMotion ==
             PUSHER_REVERSE) {
 
-      emitEvent(
+      emitInfoEvent(
           F("PUSHER_COMPLETED"),
-          reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
           reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_pusher),
           (automaticProcessIsActive() ||
            diagnosticActive)
@@ -1916,8 +1932,15 @@ void serviceMotorState() {
 // START AUTOMATIC PROCESS
 // ============================================================
 
+const __FlashStringHelper *localBatchLabel() {
+  static const char labels[][8] PROGMEM = {"Batch 1", "Batch 2", "Batch 3"};
+  return reinterpret_cast<const __FlashStringHelper *>(labels[localCycle.batch]);
+}
+
 bool __attribute__((noinline)) startAutomaticProcess(
-    bool localDryRun = false, bool localSession = false, bool fillOnly = false) {
+    FormingMode mode = NETWORK_FORMING, bool fillOnly = false, uint8_t firstLoad = 0) {
+  const bool localDryRun = mode != NETWORK_FORMING;
+  const bool localSession = mode >= LOCAL_RECIPE;
   if (positioningStep) return false;
 
   if (localCycle.active() && !(localSession && localCycle.canForm())) {
@@ -2014,16 +2037,22 @@ bool __attribute__((noinline)) startAutomaticProcess(
 
   if (localSession) {
     if (!localCycle.active()) {
-      localCycle.preheat(millis());
-      if (!fillOnly) {
-        Serial.println(F("TEMP? W/X"));
-        return true;
+      if (mode == REMOTE_BATCH_RECIPE) {
+        localCycle.sessionAt = millis();
+      } else {
+        localCycle.preheat(millis());
+        if (!fillOnly) {
+          Serial.println(F("TEMP? W/X"));
+          return true;
+        }
       }
     }
     // Break heater enable BEFORE starting any forming movement.
     digitalWrite(HEATER_ENABLE_PIN, LOW);
     localCycle.begin();
+    localCycle.batch = firstLoad;
     localCycle.fillOnly = fillOnly;
+    localCycle.remote = mode == REMOTE_BATCH_RECIPE;
     localLoadPaper = localMixWater = false;
   }
 
@@ -2056,12 +2085,10 @@ bool __attribute__((noinline)) startAutomaticProcess(
   USB_LOG.println(
       reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_76));
 
-  emitEvent(
+  emitFormingEvent(
       F("PROCESS_STARTED"),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
-      F("Process started"));
+      localSession && !fillOnly ? localBatchLabel() :
+      !localDryRun ? F("Single batch") : F("Process started"));
 
   return true;
 }
@@ -2493,8 +2520,6 @@ void startPaperProcessing() {
       PROCESS_MIXER_USE_RPWM ? LOW : HIGH);
   }
 
-  Serial.println(F("SHREDDING"));
-
   automaticProcessState =
       PROCESS_SHREDDING_AND_MIXING;
 
@@ -2503,18 +2528,15 @@ void startPaperProcessing() {
 
   if (localCycle.fillOnly || localLoadPaper) localCycle.startWater(processStateStartedAtMs);
 
-  emitEvent(
+  emitFormingEvent(
       reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_121),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
+      localCycle.active() && !localCycle.fillOnly ? localBatchLabel() :
       sensorControlledProcess
           ? F("Paper; mixing")
           : F("Batch started"));
 
-  emitEvent(
+  emitInfoEvent(
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_SHREDDER_STARTED),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
       reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_124));
@@ -2627,11 +2649,8 @@ void serviceAutomaticProcess() {
 
           paperClearSeen = false;
 
-          emitEvent(
+          emitFormingEvent(
               F("WAITING_FOR_PAPER"),
-              reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-              reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-              reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
               F("Ready for paper"));
         }
       }
@@ -2680,9 +2699,8 @@ void serviceAutomaticProcess() {
         }
 
         if (!keepShredderOn) {
-          emitEvent(
+          emitInfoEvent(
               reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_86),
-              reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
               reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
               reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
               F("Mixing"));
@@ -2710,16 +2728,12 @@ void serviceAutomaticProcess() {
         processStateStartedAtMs =
             nowMs;
 
-        emitEvent(
+        emitFormingEvent(
             reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_121),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             F("Shredding resumed"));
 
-        emitEvent(
+        emitInfoEvent(
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_SHREDDER_STARTED),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_shredder),
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_124));
@@ -2798,9 +2812,8 @@ void serviceAutomaticProcess() {
         USB_LOG.println(
             F("Mixer stopped; waiting before opening gate"));
 
-        emitEvent(
+        emitInfoEvent(
             reinterpret_cast<const __FlashStringHelper *>(PB_SHARED_88),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_mixer),
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             F("Mixing ended"));
@@ -2852,11 +2865,8 @@ void serviceAutomaticProcess() {
         USB_LOG.println(
             F("STEP: releasing material into the closed molder"));
 
-        emitEvent(
+        emitFormingEvent(
             F("MATERIAL_RELEASE_STARTED"),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             F("Release"));
       }
 
@@ -2905,11 +2915,8 @@ void serviceAutomaticProcess() {
         USB_LOG.println(
             F("STEP: presser extending"));
 
-        emitEvent(
+        emitFormingEvent(
             F("PRESSING_STARTED"),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             F("Pressing"));
 
         requestPulse(
@@ -2950,7 +2957,7 @@ void serviceAutomaticProcess() {
           if (localCycle.batch < 2) {
             localLoadPaper = localMixWater = false;
             automaticProcessState = PROCESS_WAITING_FOR_NEXT_BATCH;
-            Serial.println(F("NEXT LOAD: paper"));
+            emitFormingEvent(F("BATCH_COMPLETED"), localBatchLabel());
             break;
           }
           if (!localCycle.repressed) {
@@ -2982,11 +2989,8 @@ void serviceAutomaticProcess() {
         USB_LOG.println(
             F("STEP: opening molder gate for ejection"));
 
-        emitEvent(
+        emitFormingEvent(
             F("EJECTION_STARTED"),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             F("Open molder"));
 
         setMolderAngle(
@@ -3063,11 +3067,8 @@ void serviceAutomaticProcess() {
         USB_LOG.println(
             F("STEP: closing molder gate"));
 
-        emitEvent(
+        emitFormingEvent(
             F("GATES_CLOSING"),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
             F("Close gates"));
 
         setMolderAngle(
@@ -3095,15 +3096,14 @@ void serviceAutomaticProcess() {
         if (localCycle.phase ==
             StandaloneCycle::FORMING) {
 
-          stopAllMotors(false);
-
-          localCycle.heat(
-              nowMs);
-
-          Serial.println(
-              F("DRYING"));
-
-          break;
+          emitFormingEvent(F("BATCH_COMPLETED"), localBatchLabel());
+          if (!localCycle.remote) {
+            stopAllMotors(false);
+            localCycle.heat(nowMs);
+            Serial.println(F("DRYING"));
+            break;
+          }
+          localCycle.cancel();
         }
 
         processCompletedAtMs =
@@ -3112,9 +3112,8 @@ void serviceAutomaticProcess() {
         USB_LOG.println(
             F("PROCESS COMPLETE: mixer and molder gates closed"));
 
-        emitEvent(
+        emitInfoEvent(
             F("PROCESS_COMPLETED"),
-            reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_process),
             reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_stopped),
             sensorControlledProcess
@@ -3540,9 +3539,8 @@ bool startComponentTest() {
   diagnosticStepAtMs =
       millis();
 
-  emitEvent(
+  emitInfoEvent(
       F("TEST_STARTED"),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_diagnostics),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
       F("Unloaded test"));
@@ -3599,9 +3597,8 @@ void serviceComponentTest() {
         diagnosticStep != 7 &&
         diagnosticStep != 9) {
 
-      emitEvent(
+      emitInfoEvent(
           F("TEST_ITEM_STARTED"),
-          reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
           diagnosticItem(
               diagnosticStep),
           reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
@@ -3820,9 +3817,8 @@ void serviceComponentTest() {
       diagnosticStep != 6 &&
       diagnosticStep != 8) {
 
-    emitEvent(
+    emitInfoEvent(
         F("TEST_ITEM_DONE"),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         diagnosticItem(
             diagnosticStep),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_running),
@@ -3840,9 +3836,8 @@ void serviceComponentTest() {
 
     diagnosticActive = false;
 
-    emitEvent(
+    emitInfoEvent(
         F("TEST_COMPLETED"),
-        reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_diagnostics),
         reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_stopped),
         F("Inspect tests"));
@@ -3887,233 +3882,79 @@ bool validRemoteCommandId(
   return true;
 }
 
-void failRemoteCommand(
-    const char *id,
-    const char *message) {
+static void __attribute__((noinline)) finishRemoteCommand(
+    const char *id, const char *status, const char *message) {
+  emitAck(id, status, message);
+  rememberRemoteResult(id, status, message);
+}
 
-  emitAck(
-      id,
-      "FAILED",
-      message);
-
-  rememberRemoteResult(
-      id,
-      "FAILED",
-      message);
+void failRemoteCommand(const char *id, const char *message) {
+  finishRemoteCommand(id, "FAILED", message);
 }
 
 // ============================================================
 // MACHINE HEALTH
 // ============================================================
 
-void reportMachineHealth(
-    const char *id) {
+static void __attribute__((noinline)) printHealthDigit(uint8_t value) {
+  espLink.print('|');
+  espLink.print(char('0' + value));
+}
 
+void reportMachineHealth(const char *id) {
   serviceProduction();
 
   espLink.print(F("PRO2|"));
   espLink.print(id);
-
   espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_PRODUCTION_PUMP_MAX_SECONDS);
-
+  espLink.print(PAPERBRIQ_PRODUCTION_PUMP_MAX_SECONDS);
   espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_PRODUCTION_DRYING_MAX_SECONDS);
-
+  espLink.print(PAPERBRIQ_PRODUCTION_DRYING_MAX_SECONDS);
+  printHealthDigit(PAPERBRIQ_PUMP_VERIFIED != 0);
+  printHealthDigit(PAPERBRIQ_HEATER_VERIFIED != 0);
+  printHealthDigit(production.kind == 'P' ? 1 : production.kind == 'D' ? 2 : production.kind == 'H' ? 3 : 0);
+  printHealthDigit((uint8_t)production.phase);
   espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_PUMP_VERIFIED
-          ? 1
-          : 0);
-
+  espLink.print(production.run);
   espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_HEATER_VERIFIED
-          ? 1
-          : 0);
-
+  espLink.print(production.total);
   espLink.print('|');
-  espLink.print(
-      production.kind == 'P'
-          ? 1
-          : production.kind == 'D'
-                ? 2
-                : production.kind == 'H'
-                      ? 3
-                      : 0);
-
+  espLink.print(production.elapsed(millis()));
   espLink.print('|');
-  espLink.print(
-      (uint8_t)production.phase);
-
+  espLink.print(production.remaining(millis()));
   espLink.print('|');
-  espLink.print(
-      production.run);
-
+  espLink.print(PAPERBRIQ_PREHEAT_MAX_SECONDS);
   espLink.print('|');
-  espLink.print(
-      production.total);
-
-  espLink.print('|');
-  espLink.print(
-      production.elapsed(
-          millis()));
-
-  espLink.print('|');
-  espLink.print(
-      production.remaining(
-          millis()));
-
-  espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_PREHEAT_MAX_SECONDS);
-
-  espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_CHAMBER_TARGET_C);
-
-  espLink.print('|');
-  espLink.print(
-      heaterReadingValid &&
-              millis() -
-                      heaterReadingAt <
-                  5000UL
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      (uint8_t)thermal.stage);
-
-  espLink.print('|');
-  espLink.println(
-      PAPERBRIQ_HEATER_FAN_CONFIRMED
-          ? 1
-          : 0);
+  espLink.print(PAPERBRIQ_CHAMBER_TARGET_C);
+  printHealthDigit(heaterReadingValid && millis() - heaterReadingAt < 5000UL);
+  printHealthDigit((uint8_t)thermal.stage);
+  printHealthDigit(PAPERBRIQ_HEATER_FAN_CONFIRMED != 0);
+  espLink.println();
 
   uint8_t inputs = 0xFF;
+  const bool controls = readControlIo(inputs);
+  Wire.beginTransmission(STATUS_IO_ADDRESS);
+  const bool indicators = Wire.endTransmission() == 0;
 
-  const bool controls =
-      readControlIo(
-          inputs);
-
-  Wire.beginTransmission(
-      STATUS_IO_ADDRESS);
-
-  const bool indicators =
-      Wire.endTransmission() == 0;
-
-  espLink.print(
-      F("HEALTH|"));
-
+  espLink.print(F("HEALTH|"));
   espLink.print(id);
-
-  espLink.print('|');
-  espLink.print(
-      controls
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      controls &&
-              (inputs &
-               STOP_BUTTON_MASK) == 0
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      controls &&
-              (inputs &
-               EMERGENCY_BUTTON_MASK) == 0
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      indicators
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      !softwareStopLatched &&
-              chamber.ready() &&
-              !diagnosticActive
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      chamber.online &&
-              chamber.doorClosed
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      chamber.fanOn
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      chamber.unlockOn
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      diagnosticActive
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      PAPERBRIQ_STANDALONE_BENCH
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      heaterTestActive
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.print(
-      pumpTestActive
-          ? 1
-          : 0);
-
-  const bool idle =
-      benchConditionsReady() &&
-      !production.active() &&
-      !heaterTestActive &&
-      !pumpTestActive;
-
-  espLink.print('|');
-  espLink.print(
-      idle &&
-              (!heaterBenchUsed ||
-               millis() -
-                       heaterTestAt >=
-                   60000UL)
-          ? 1
-          : 0);
-
-  espLink.print('|');
-  espLink.println(
-      idle &&
-              (!pumpHasRun ||
-               millis() -
-                       pumpTestAt >=
-                   10000UL)
-          ? 1
-          : 0);
+  printHealthDigit(controls);
+  printHealthDigit(controls && (inputs & STOP_BUTTON_MASK) == 0);
+  printHealthDigit(controls && (inputs & EMERGENCY_BUTTON_MASK) == 0);
+  printHealthDigit(indicators);
+  printHealthDigit(!softwareStopLatched && chamber.ready() && !diagnosticActive);
+  printHealthDigit(chamber.online && chamber.doorClosed);
+  printHealthDigit(chamber.fanOn);
+  printHealthDigit(chamber.unlockOn);
+  printHealthDigit(diagnosticActive);
+  printHealthDigit(PAPERBRIQ_STANDALONE_BENCH != 0);
+  printHealthDigit(heaterTestActive);
+  printHealthDigit(pumpTestActive);
+  const bool idle = benchConditionsReady() && !production.active() && !heaterTestActive && !pumpTestActive;
+  printHealthDigit(idle && (!heaterBenchUsed || millis() - heaterTestAt >= 60000UL));
+  printHealthDigit(idle && (!pumpHasRun || millis() - pumpTestAt >= 10000UL));
+  printHealthDigit(availableBatches());
+  espLink.println();
 }
 
 // ============================================================
@@ -4136,10 +3977,10 @@ void handleRemoteCommandFrame(
 
   const uint8_t receivedLength = strlen(line);
 
-  Serial.print(
+  USB_LOG.print(
       F("RX: "));
 
-  Serial.println(
+  USB_LOG.println(
       line);
 
   char *prefix =
@@ -4305,15 +4146,7 @@ void handleRemoteCommandFrame(
 
     if (accepted) {
 
-      emitAck(
-          id,
-          "COMPLETED",
-          "production_applied");
-
-      rememberRemoteResult(
-          id,
-          "COMPLETED",
-          "production_applied");
+      finishRemoteCommand(id, "COMPLETED", "production_applied");
 
     } else {
 
@@ -4364,15 +4197,7 @@ void handleRemoteCommandFrame(
             ? heaterTestActive
             : pumpTestActive) {
 
-      emitAck(
-          id,
-          "COMPLETED",
-          "timed_run_started");
-
-      rememberRemoteResult(
-          id,
-          "COMPLETED",
-          "timed_run_started");
+      finishRemoteCommand(id, "COMPLETED", "timed_run_started");
 
     } else {
 
@@ -4390,15 +4215,7 @@ void handleRemoteCommandFrame(
 
     if (startComponentTest()) {
 
-      emitAck(
-          id,
-          "COMPLETED",
-          "test_started");
-
-      rememberRemoteResult(
-          id,
-          "COMPLETED",
-          "test_started");
+      finishRemoteCommand(id, "COMPLETED", "test_started");
 
     } else {
 
@@ -4416,15 +4233,7 @@ void handleRemoteCommandFrame(
 
     latchSoftwareStop();
 
-    emitAck(
-        id,
-        "COMPLETED",
-        "stopped");
-
-    rememberRemoteResult(
-        id,
-        "COMPLETED",
-        "stopped");
+    finishRemoteCommand(id, "COMPLETED", "stopped");
 
     return;
   }
@@ -4435,15 +4244,7 @@ void handleRemoteCommandFrame(
 
     if (armMotorTest()) {
 
-      emitAck(
-          id,
-          "COMPLETED",
-          "armed");
-
-      rememberRemoteResult(
-          id,
-          "COMPLETED",
-          "armed");
+      finishRemoteCommand(id, "COMPLETED", "armed");
 
     } else {
 
@@ -4455,9 +4256,9 @@ void handleRemoteCommandFrame(
     return;
   }
 
-  if (strcmp(
-          action,
-          "START") == 0) {
+  const bool batchCommand = action[0] == 'B' && action[1] >= '1' &&
+      action[1] <= '3' && !action[2];
+  if (batchCommand || strcmp(action, "START") == 0) {
 
     if (softwareStopLatched) {
 
@@ -4466,25 +4267,17 @@ void handleRemoteCommandFrame(
           "not_armed");
 
     } else if (
-        automaticProcessIsActive() ||
-        runState != STATE_IDLE) {
+        !batchCommand && (automaticProcessIsActive() ||
+        runState != STATE_IDLE)) {
 
       failRemoteCommand(
           id,
           "busy");
 
     } else if (
-        startAutomaticProcess()) {
+        batchCommand ? selectBatch(action[1] - '1') : startAutomaticProcess()) {
 
-      emitAck(
-          id,
-          "COMPLETED",
-          "started");
-
-      rememberRemoteResult(
-          id,
-          "COMPLETED",
-          "started");
+      finishRemoteCommand(id, "COMPLETED", "started");
 
     } else {
 
@@ -4859,23 +4652,22 @@ void serviceBridgeCommands() {
 // BENCH CONDITIONS
 // ============================================================
 
-bool benchConditionsReady(bool allowArmedPump) {
-  if (positioningStep) return false;
+bool __attribute__((noinline)) machineInputsReady() {
+  return statusIoOnline && chamber.ready() && controlIoOnline &&
+      !stopButton.rawActive && !stopButton.stableActive &&
+      !emergencyButton.rawActive && !emergencyButton.stableActive;
+}
 
-  return
-      !localCycle.active() &&
+static bool __attribute__((noinline)) motionIdle() {
+  return !positioningStep && !diagnosticActive && !statusSelfTestActive &&
+      runState == STATE_IDLE && machineInputsReady();
+}
+
+bool benchConditionsReady(bool allowArmedPump) {
+  return !localCycle.active() &&
       (softwareStopLatched || allowArmedPump) &&
-      !diagnosticActive &&
-      !statusSelfTestActive &&
-      runState == STATE_IDLE &&
       !automaticProcessIsActive() &&
-      statusIoOnline &&
-      chamber.ready() &&
-      controlIoOnline &&
-      !stopButton.rawActive &&
-      !stopButton.stableActive &&
-      !emergencyButton.rawActive &&
-      !emergencyButton.stableActive;
+      motionIdle();
 }
 
 // ============================================================
@@ -4968,13 +4760,7 @@ void serviceProduction() {
   }
 
   const bool safe =
-      chamber.ready() &&
-      statusIoOnline &&
-      controlIoOnline &&
-      !stopButton.rawActive &&
-      !stopButton.stableActive &&
-      !emergencyButton.rawActive &&
-      !emergencyButton.stableActive &&
+      machineInputsReady() &&
       !diagnosticActive &&
       !statusSelfTestActive &&
       !pumpTestActive &&
@@ -5334,10 +5120,32 @@ void startHeaterTest() {
 // LOCAL STANDALONE CYCLE
 // ============================================================
 
-static void __attribute__((noinline)) continueLocalBatch(unsigned long now) {
-  localCycle.nextBatch();
+static void __attribute__((noinline)) continueLocalBatch(unsigned long now, uint8_t batch) {
+  localCycle.nextBatch(batch);
   automaticProcessState = PROCESS_WAITING_TO_CLOSE_GATE;
   processStateStartedAtMs = now;
+}
+
+uint8_t __attribute__((noinline)) availableBatches() {
+  const unsigned long now = millis();
+  if (!PAPERBRIQ_ESP_LINK_ENABLED || !PAPERBRIQ_PUMP_VERIFIED || !haveDualPaper ||
+      now - dualPaperAt >= 1500UL || softwareStopLatched || production.active() ||
+      heaterTestActive || pumpTestActive || !motionIdle()) return 0;
+  if (!localCycle.active() && !automaticProcessIsActive()) return 7;
+  if (automaticProcessState != PROCESS_WAITING_FOR_NEXT_BATCH ||
+      now - lastMotorStoppedAtMs < DIRECTION_CHANGE_PAUSE_MS || localCycle.expired(now)) return 0;
+  return localCycle.batch == 0 ? 6 : 4;
+}
+
+bool selectBatch(uint8_t batch) {
+  serviceChamber(true);
+  serviceControlButtons();
+  if (!(availableBatches() & (1 << batch))) return false;
+  if (automaticProcessState == PROCESS_WAITING_FOR_NEXT_BATCH) {
+    continueLocalBatch(millis(), batch);
+    return true;
+  }
+  return startAutomaticProcess(REMOTE_BATCH_RECIPE, false, batch);
 }
 
 bool __attribute__((noinline)) startStandaloneCycle(bool fillOnly, uint8_t firstLoad) {
@@ -5356,7 +5164,7 @@ bool __attribute__((noinline)) startStandaloneCycle(bool fillOnly, uint8_t first
     const unsigned long now = millis();
     if (now - lastMotorStoppedAtMs < DIRECTION_CHANGE_PAUSE_MS) return false;
     // Safety was re-sampled above. Session deadline remains unchanged.
-    continueLocalBatch(now);
+    continueLocalBatch(now, localCycle.batch + 1);
     return true;
   }
 
@@ -5372,8 +5180,7 @@ bool __attribute__((noinline)) startStandaloneCycle(bool fillOnly, uint8_t first
     return false;
   }
 
-  if (!startAutomaticProcess(
-          true, true, fillOnly)) {
+  if (!startAutomaticProcess(LOCAL_RECIPE, fillOnly, firstLoad)) {
 
     Serial.println(
         reinterpret_cast<const __FlashStringHelper *>(PB_BLOCKED));
@@ -5381,7 +5188,6 @@ bool __attribute__((noinline)) startStandaloneCycle(bool fillOnly, uint8_t first
     return false;
   }
 
-  localCycle.batch = firstLoad;
   serviceStandaloneCycle();
   return localCycle.active();
 }
@@ -5402,14 +5208,7 @@ void serviceStandaloneCycle() {
     return;
   }
 
-  const bool safe =
-      controlIoOnline &&
-      statusIoOnline &&
-      chamber.ready() &&
-      !stopButton.rawActive &&
-      !stopButton.stableActive &&
-      !emergencyButton.rawActive &&
-      !emergencyButton.stableActive;
+  const bool safe = machineInputsReady();
 
   if (!safe || softwareStopLatched ||
       (localCycle.phase ==
@@ -5443,7 +5242,7 @@ void serviceStandaloneCycle() {
   const bool paperLinkFresh = now - dualPaperAt < 1500UL;
   if (automaticProcessState == PROCESS_WAITING_FOR_NEXT_BATCH && localLoadPaper) {
     if (!paperLinkFresh) localLoadPaper = false;
-    else if (now - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) continueLocalBatch(now);
+    else if (now - lastMotorStoppedAtMs >= DIRECTION_CHANGE_PAUSE_MS) continueLocalBatch(now, localCycle.batch + 1);
   }
 
   if (localCycle.phase == StandaloneCycle::HEATING &&
@@ -5538,8 +5337,8 @@ void serviceSerialCommands() {
         Serial.read();
 
     if (command == '1' || command == '5' || command == '6') {
-      Serial.print(F("USB RX: "));
-      Serial.println(command);
+      USB_LOG.print(F("USB RX: "));
+      USB_LOG.println(command);
     }
 
     if (positioningStep && strchr("zZxXhHiI\r\n \t", command) == nullptr) {
@@ -5569,7 +5368,7 @@ void serviceSerialCommands() {
     switch (command) {
       case 'a':
       case 'A':
-        if (PAPERBRIQ_ESP_LINK_ENABLED && startAutomaticProcess(true)) {
+        if (PAPERBRIQ_ESP_LINK_ENABLED && startAutomaticProcess(DRY_FORMING)) {
           irShredTest = true;
           sensorControlledProcess = true;
         }
@@ -5772,8 +5571,7 @@ void serviceSerialCommands() {
       case 'g':
       case 'G':
 
-        if (startAutomaticProcess(
-                true)) {
+        if (startAutomaticProcess(DRY_FORMING)) {
 
           Serial.println(
               F("G: unloaded"));
@@ -6051,9 +5849,8 @@ void setup() {
 
   printHelp();
 
-  emitEvent(
+  emitInfoEvent(
       F("CONTROLLER_READY"),
-      reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_info),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_controller),
       reinterpret_cast<const __FlashStringHelper *>(PB_TEXT_stopped),
       F("Ready"));

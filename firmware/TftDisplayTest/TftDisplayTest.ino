@@ -29,7 +29,8 @@ void setup() {
   digitalWrite(TFT_CS, HIGH);
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
   tft.initR(INITR_BLACKTAB);
-  tft.setRotation(3);
+  tft.setSPISpeed(1000000);
+  tft.setRotation(1);
 
   showColor(ST77XX_RED, "RED");
   showColor(ST77XX_GREEN, "GREEN");

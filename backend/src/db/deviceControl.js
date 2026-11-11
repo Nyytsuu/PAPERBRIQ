@@ -88,9 +88,8 @@ function timeValue(value) {
 
 function inferProcessState(events, commands) {
   const latestStateEvent = events.find((event) => event.processState);
-  // Output timers are reported separately; editing one must not erase the
-  // forming process state or mark its current stage interrupted.
-  const latest = commands.find(command => !/^(PP|DD|PT|DT|HH):/.test(command.command));
+  // Timer and batch commands report their changes through controller events.
+  const latest = commands.find(command => !/^(PP|DD|PT|DT|HH):|^batch_[1-3]$/.test(command.command));
   if (!latestStateEvent) return commandProcessState(latest);
   if (!latest) return latestStateEvent.processState;
 

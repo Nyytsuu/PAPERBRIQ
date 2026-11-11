@@ -21,9 +21,17 @@ import com.paperbriq.app.ui.Ui;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Locale;
 
 public class ProcessTrackingScreen implements AppScreen {
+    private static final DateTimeFormatter UPDATE_TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private String viewedRunStartedAt = "";
+    private int selectedBatch;
+
     @Override
     public String key() {
         return "process";
@@ -50,31 +58,11 @@ public class ProcessTrackingScreen implements AppScreen {
         JSONObject payload = controller.session().pagePayload("process");
         JSONObject activeBatch = payload.optJSONObject("activeBatch");
         JSONObject processRun = controller.session().pagePayload("deviceControl").optJSONObject("processRun");
-        JSONArray steps = processRun == null ? null : processRun.optJSONArray("steps");
         JSONArray qualityChecks = payload.optJSONArray("qualityChecks");
 
-        if (controller.canControlMachine()) {
-            addMachineControls(root, controller, ui);
-            addProductionSettings(root, controller, ui);
-        }
-
-        root.addView(ui.sectionTitle("Forming steps", ""));
-        root.addView(ui.text(processRun == null ? "Waiting for controller step reports"
-            : processRun.optString("label", "Waiting for a forming run"),
-            16, AppColors.INK, Typeface.BOLD), ui.fullWidth(-2, 0, 0, 0, ui.dp(6)));
-        root.addView(ui.text("These are reported controller steps, not proof that a motor or gate moved.",
-            12, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, 0, 0, ui.dp(10)));
-        Button viewSteps = ui.outlineButton("View forming steps");
-        viewSteps.setOnClickListener(view -> {
-            ScrollView scroll = new ScrollView(controller.activity());
-            LinearLayout content = ui.column();
-            content.setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(12));
-            content.addView(ui.simpleList(stepRows(steps, ui)));
-            scroll.addView(content, ui.matchWrap());
-            new AlertDialog.Builder(controller.activity()).setTitle("Forming steps")
-                .setView(scroll).setPositiveButton("Close", null).show();
-        });
-        root.addView(viewSteps, ui.fullWidth(ui.dp(48), 0, 0, 0, ui.dp(10)));
+        if (controller.canControlMachine()) addMachineControls(root, controller, ui);
+        addFormingProgress(root, controller, ui, processRun);
+        if (controller.canControlMachine()) addProductionSettings(root, controller, ui);
 
         JSONObject checks = controller.session().pagePayload("deviceControl").optJSONObject("machineChecks");
         JSONObject chamber = checks == null ? null : checks.optJSONObject("chamber");
@@ -99,6 +87,124 @@ public class ProcessTrackingScreen implements AppScreen {
         root.addView(details, ui.fullWidth(ui.dp(48), 0, ui.dp(10), 0, 0));
     }
 
+    private void addFormingProgress(LinearLayout root, AppController controller, Ui ui, JSONObject processRun) {
+        String startedAt = processRun == null ? "" : processRun.optString("startedAt", "");
+        if (!viewedRunStartedAt.equals(startedAt)) {
+            viewedRunStartedAt = startedAt;
+            selectedBatch = 0;
+        }
+        int activeBatch = processRun == null ? 0 : processRun.optInt("activeBatch");
+        int latestBatch = processRun == null ? 0 : processRun.optInt("latestBatch");
+        JSONObject batchControls = controller.session().pagePayload("deviceControl").optJSONObject("batchControls");
+        JSONArray available = batchControls == null ? null : batchControls.optJSONArray("available");
+        boolean canControl = controller.hasMachineAccess();
+        LinearLayout card = ui.card(18);
+        card.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
+        card.addView(ui.text("Forming progress", 19, AppColors.INK, Typeface.BOLD));
+        if (activeBatch > 0) {
+            card.addView(ui.text("Batch " + activeBatch + " is current", 14, AppColors.GREEN_DARK, Typeface.BOLD));
+        }
+        LinearLayout tabs = ui.row();
+        LinearLayout batchContent = ui.column();
+        Button[] buttons = new Button[3];
+        for (int index = 0; index < buttons.length; index++) {
+            int batch = index + 1;
+            String label = "Batch " + batch;
+            boolean canStart = canControl && containsBatch(available, batch);
+            Button button = batch == activeBatch ? ui.greenButton(label) : ui.outlineButton(label);
+            if (canStart) button.setText(label + "\nStart");
+            button.setPadding(ui.dp(4), 0, ui.dp(4), 0);
+            button.setContentDescription(label + (batch == activeBatch ? ", current batch" : canStart ? ", available to start" : ""));
+            button.setOnClickListener(view -> {
+                selectedBatch = batch == activeBatch ? 0 : batch;
+                showBatchProgress(batchContent, controller, ui, processRun, buttons, batch);
+                if (canStart) {
+                    String title = activeBatch > 0 ? "Go to " + label + "?" : "Start at " + label + "?";
+                    String message = activeBatch > 0
+                        ? "The machine will begin " + label + ". Stay beside the machine with the door closed."
+                        : "This starts " + label + " from the beginning. Check any leftover material and water, return the presser and pusher to their starting positions, and stay beside the machine.";
+                    controller.confirmAction(title, message, () -> controller.selectFormingBatch(batch));
+                }
+            });
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, ui.dp(48), 1);
+            if (index > 0) size.leftMargin = ui.dp(8);
+            tabs.addView(button, size);
+            buttons[index] = button;
+        }
+        card.addView(tabs, ui.fullWidth(-2, 0, ui.dp(8), 0, ui.dp(10)));
+        if (canControl && batchControls != null) {
+            String guidance = batchControls.optString("reason");
+            if (available != null && available.length() > 0) {
+                guidance = activeBatch > 0 ? "The machine is ready for the next batch." : "Choose a batch marked Start.";
+            }
+            if (!guidance.isEmpty()) card.addView(ui.text(guidance, 13, AppColors.MUTED, Typeface.NORMAL),
+                ui.fullWidth(-2, 0, 0, 0, ui.dp(8)));
+        }
+        card.addView(batchContent, ui.matchWrap());
+        showBatchProgress(batchContent, controller, ui, processRun, buttons, selectedBatch == 0 ? latestBatch : selectedBatch);
+        root.addView(card, ui.fullWidth(-2, 0, 0, 0, ui.dp(10)));
+    }
+
+    private boolean containsBatch(JSONArray batches, int number) {
+        if (batches == null) return false;
+        for (int index = 0; index < batches.length(); index++) {
+            if (batches.optInt(index) == number) return true;
+        }
+        return false;
+    }
+
+    private void showBatchProgress(LinearLayout content, AppController controller, Ui ui,
+                                   JSONObject processRun, Button[] buttons, int batch) {
+        content.removeAllViews();
+        for (int index = 0; index < buttons.length; index++) {
+            buttons[index].setSelected(index + 1 == batch);
+        }
+        JSONArray batches = processRun == null ? null : processRun.optJSONArray("batches");
+        JSONObject progress = batch == 0 ? processRun : batches == null ? null : batches.optJSONObject(batch - 1);
+        String title = batch == 0 ? "" : "Viewing Batch " + batch;
+        if (!title.isEmpty()) content.addView(ui.text(title, 16, AppColors.INK, Typeface.BOLD));
+        String label = progress == null ? "Waiting for controller reports"
+            : progress.optString("label", "Waiting for a forming run");
+        content.addView(ui.text(label, 14, AppColors.INK, Typeface.NORMAL),
+            ui.fullWidth(-2, 0, 0, 0, ui.dp(6)));
+        content.addView(FormingProgressChart.create(ui, progress), ui.matchWrap());
+        content.addView(ui.text("Machine updates", 15, AppColors.INK, Typeface.BOLD),
+            ui.fullWidth(-2, 0, ui.dp(14), 0, ui.dp(4)));
+        JSONArray activity = progress == null ? null : progress.optJSONArray("activity");
+        if (activity == null || activity.length() == 0) {
+            content.addView(ui.text("Updates appear when the controller reports progress.", 13, AppColors.MUTED, Typeface.NORMAL));
+        } else {
+            for (int index = 0; index < activity.length(); index++) {
+                JSONObject update = activity.optJSONObject(index);
+                if (update == null) continue;
+                content.addView(ui.text(formatUpdate(update), 14, index == 0 ? AppColors.INK : AppColors.MUTED,
+                    index == 0 ? Typeface.BOLD : Typeface.NORMAL), ui.fullWidth(-2, 0, 0, 0, ui.dp(6)));
+            }
+        }
+        JSONArray steps = progress == null ? null : progress.optJSONArray("steps");
+        Button viewSteps = ui.outlineButton("View forming steps");
+        viewSteps.setOnClickListener(view -> {
+            ScrollView scroll = new ScrollView(controller.activity());
+            LinearLayout details = ui.column();
+            details.setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(12));
+            details.addView(ui.simpleList(stepRows(steps, ui)));
+            scroll.addView(details, ui.matchWrap());
+            new AlertDialog.Builder(controller.activity()).setTitle(batch == 0 ? "Forming steps" : "Batch " + batch + " steps")
+                .setView(scroll).setPositiveButton("Close", null).show();
+        });
+        content.addView(viewSteps, ui.fullWidth(ui.dp(48), 0, ui.dp(6), 0, 0));
+    }
+
+    private String formatUpdate(JSONObject update) {
+        String text = update.optString("text");
+        try {
+            String time = UPDATE_TIME.withZone(ZoneId.systemDefault()).format(Instant.parse(update.optString("reportedAt")));
+            return time + "  " + text;
+        } catch (DateTimeParseException ignored) {
+            return text;
+        }
+    }
+
     private String reportedBoolean(JSONObject report, String key, String yes, String no) {
         return report == null || !report.has(key) || report.isNull(key)
             ? "Not reported" : report.optBoolean(key) ? yes : no;
@@ -111,7 +217,7 @@ public class ProcessTrackingScreen implements AppScreen {
         JSONObject run = controls == null ? null : controls.optJSONObject("run");
         LinearLayout card = ui.card(18);
         card.setPadding(ui.dp(16), ui.dp(16), ui.dp(16), ui.dp(16));
-        card.addView(ui.text("Water and drying", 19, AppColors.INK, Typeface.BOLD));
+        card.addView(ui.text("Drying settings", 19, AppColors.INK, Typeface.BOLD));
         JSONObject thermal = controls == null ? null : controls.optJSONObject("thermal");
         JSONObject preheat = controls == null ? null : controls.optJSONObject("preheat");
         int target = thermal == null ? 0 : thermal.optInt("targetC");
@@ -145,18 +251,6 @@ public class ProcessTrackingScreen implements AppScreen {
             : preheat.optString("reason", "Waiting for machine controls."), 12, AppColors.MUTED, Typeface.NORMAL));
         card.addView(ui.text("Preheat while forming is stopped. Press Stop, load briquettes, close the door, then Start drying. The drying countdown begins after the chamber reaches temperature. Opening the door cancels heating; closing it does not restart it.",
             12, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, ui.dp(8), 0, 0));
-        JSONObject pump = controls == null ? null : controls.optJSONObject("pump");
-        Button enablePump = ui.greenButton("Enable preset pump for next batch");
-        boolean pumpAvailable = machineAccess && pump != null && pump.optBoolean("canStart");
-        enablePump.setEnabled(pumpAvailable);
-        enablePump.setAlpha(pumpAvailable ? 1f : 0.45f);
-        enablePump.setOnClickListener(v -> controller.confirmAction("Enable the preset pump?",
-            "After enabling, use Reset and Start forming. Wait for Ready for paper before feeding.",
-            () -> controller.sendProductionCommand("pump_arm", 0, "")));
-        card.addView(enablePump, ui.fullWidth(ui.dp(52), 0, ui.dp(12), 0, 0));
-        if (!pumpAvailable && pump != null && !pump.optString("reason").isEmpty()) {
-            card.addView(ui.text(pump.optString("reason"), 12, AppColors.MUTED, Typeface.NORMAL));
-        }
         String action = "drying";
         String label = "Drying time";
         LinearLayout row = ui.row();
@@ -375,17 +469,9 @@ public class ProcessTrackingScreen implements AppScreen {
             String commandStatus = command == null ? "" : command.optString("status");
             if ("queued".equals(commandStatus) || "delivered".equals(commandStatus)) commandActive = true;
         }
-        boolean startableState = "idle".equalsIgnoreCase(processState) ||
-            "ready".equalsIgnoreCase(processState) ||
-            "stopped".equalsIgnoreCase(processState) ||
-            "complete".equalsIgnoreCase(processState) ||
-            "completed".equalsIgnoreCase(processState);
-        boolean startAvailable = enabled && online && !commandActive && startableState;
-        boolean checksPassed = controller.automaticMachineChecksReady();
-        JSONObject production = status.optJSONObject("productionControls");
-        JSONObject cycle = production == null ? null : production.optJSONObject("run");
-        boolean pumpPrepared = production != null && production.optBoolean("fresh") && cycle != null
-            && "pump".equals(cycle.optString("output")) && "waiting_for_paper".equals(cycle.optString("state"));
+        JSONObject batchControls = status.optJSONObject("batchControls");
+        JSONArray available = batchControls == null ? null : batchControls.optJSONArray("available");
+        boolean startAvailable = enabled && online && !commandActive && containsBatch(available, 1);
 
         root.addView(ui.pill(online ? "PaperBriq online" : "PaperBriq offline", online ? AppColors.GREEN : AppColors.RED),
             ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(10)));
@@ -408,11 +494,11 @@ public class ProcessTrackingScreen implements AppScreen {
         card.addView(statusText, ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(12)));
 
         Button start = ui.greenButton("Start forming");
-        start.setEnabled(startAvailable && checksPassed && pumpPrepared);
+        start.setEnabled(startAvailable);
         start.setOnClickListener(view -> controller.confirmAction(
             "Start forming briquettes?",
-            "The gates close first. Wait for Ready for paper before feeding. Paper at the shredder inlet starts shredding, mixing and the preset water dose. Drying starts separately after loading the chamber.",
-            () -> controller.sendDeviceCommand("start")
+            "The machine will start Batch 1 and control the pump automatically. Check that the presser and pusher are at their starting positions and stay beside the machine.",
+            () -> controller.selectFormingBatch(1)
         ));
         Button stop = ui.greenButton("Stop");
         stop.setBackground(ui.round(AppColors.RED, ui.dp(14), Color.TRANSPARENT, 0));
@@ -433,8 +519,6 @@ public class ProcessTrackingScreen implements AppScreen {
             action.setPadding(ui.dp(4), ui.dp(8), ui.dp(4), ui.dp(8));
         }
         ui.addGrid(card, new android.view.View[]{start, stop, reset}, 3);
-        if (!pumpPrepared && startableState) card.addView(ui.text("Enable the preset pump below, then use Reset before Start forming.",
-            13, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, ui.dp(8), 0, ui.dp(12)));
 
         Button autoCheck = ui.greenButton("Check machine");
         autoCheck.setOnClickListener(view -> showFunctionalChecks(controller, ui));

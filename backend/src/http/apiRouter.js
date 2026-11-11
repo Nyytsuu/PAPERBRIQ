@@ -2,7 +2,7 @@ const { timingSafeEqual } = require("crypto");
 const { normalizeRole } = require("../config/roles");
 const { dataStore } = require("../db");
 const { normalizeMachineHealth, buildMachineChecks } = require("../db/machineChecks");
-const { buildMachineProcess } = require("../db/machineProcess");
+const { buildMachineProcess, buildBatchControls, isBatchCommand } = require("../db/machineProcess");
 const { buildComponentTests } = require("../db/componentTests");
 const { encodeTimedCommand, buildTimedControls } = require("../db/timedControls");
 const { validateSettings, buildProductionControls, encodeProductionCommand } = require('../db/productionControls');
@@ -58,13 +58,14 @@ async function routeApi(req, res, requestUrl) {
     const deviceId = normalizeDeviceId(body.deviceId);
     let command = String(body.command || "").trim().toLowerCase();
     const timed = command === "heater" || command === "pump";
+    const batchCommand = isBatchCommand(command);
     const productionCommand = ['pump_arm','drying_start','drying_time','preheat_start'].includes(command);
     const idempotencyKey = normalizeOptionalToken(req.headers["idempotency-key"], 120);
     if (!deviceId) {
       sendJson(res, 400, { error: "A valid deviceId is required." });
       return;
     }
-    if (!new Set(["start", "stop", "reset", "self_test", "heater", "pump"]).has(command) && !productionCommand) {
+    if (!new Set(["start", "stop", "reset", "self_test", "heater", "pump"]).has(command) && !productionCommand && !batchCommand) {
       sendJson(res, 400, { error: "Unsupported machine command." });
       return;
     }
@@ -82,6 +83,14 @@ async function routeApi(req, res, requestUrl) {
       if (accessError) {
         sendJson(res, accessError.status, { error: accessError.message });
         return;
+      }
+      if (batchCommand) {
+        const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
+        const batches = buildBatchControls(await dataStore.getMachineHealth(deviceId), status);
+        if (body.supervised !== true || !batches.available.includes(Number(command.at(-1)))) {
+          sendJson(res, 409, { error: batches.reason || "That batch is unavailable. Check which batches the controller allows." });
+          return;
+        }
       }
       if (productionCommand) {
         const status = await dataStore.getDeviceControlStatus(deviceId, new Date(Date.now() - deviceOnlineSeconds() * 1000));
@@ -108,7 +117,7 @@ async function routeApi(req, res, requestUrl) {
         deviceId,
         command,
         idempotencyKey,
-        ttlSeconds: timed || productionCommand ? 5 : command === "self_test" ? 15 : deviceCommandTtlSeconds()
+        ttlSeconds: timed || productionCommand ? 5 : command === "self_test" || batchCommand ? 15 : deviceCommandTtlSeconds()
       });
       sendJson(res, 201, { command: commandRecord });
     } catch (error) {
@@ -213,6 +222,7 @@ async function routeApi(req, res, requestUrl) {
         machineKeyAuthorized: enabled && deviceId === MACHINE_DEVICE_ID && secretsMatch(controlKey, req.headers["x-control-key"]),
         ...status,
         processRun: buildMachineProcess(status),
+        batchControls: buildBatchControls(healthReport, status),
         componentTests: buildComponentTests(status),
         machineChecks: buildMachineChecks(healthReport, status),
         timedControls: buildTimedControls(healthReport, status),
@@ -773,6 +783,7 @@ function normalizeDeviceEvent(body) {
 
   if (!deviceId) return { error: "A valid deviceId is required." };
   if (body.eventId && !eventKey) return { error: "eventId contains unsupported characters or is too long." };
+  if (type === "batch_completed" && !eventKey) return { error: "eventId is required for a completed batch." };
   if (!/^[a-z][a-z0-9_]{1,63}$/.test(type)) {
     return { error: "type must be 2-64 lowercase letters, numbers, or underscores." };
   }

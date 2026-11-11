@@ -41,6 +41,10 @@ public class ReportsScreen implements AppScreen {
         JSONObject reports = controller.session().pagePayload("reports");
         JSONObject monthly = reports.optJSONObject("monthly");
         JSONObject period = monthly == null ? null : monthly.optJSONObject(lastMonthSelected ? "lastMonth" : "thisMonth");
+        boolean hasSheetCount = period != null && !period.isNull("paperSheets");
+        String paperField = hasSheetCount ? "paperSheets" : "paperKg";
+        String recordedWeight = hasSheetCount && !period.isNull("paperKg")
+            ? "Weighed records · " + value(ui, period, "paperKg", " kg") : "";
 
         Button thisMonth = lastMonthSelected ? ui.outlineButton("This month") : ui.greenButton("This month");
         Button lastMonth = lastMonthSelected ? ui.greenButton("Last month") : ui.outlineButton("Last month");
@@ -55,7 +59,8 @@ public class ReportsScreen implements AppScreen {
                 12, AppColors.MUTED, Typeface.NORMAL), ui.fullWidth(-2, 0, 0, 0, ui.dp(12)));
         }
         ui.addGrid(root, new View[]{
-            ui.readingCard("Paper Collected", value(ui, period, "paperKg", " kg"), "", AppColors.GREEN),
+            ui.readingCard("Paper Collected", value(ui, period, paperField, hasSheetCount ? " sheets" : " kg"),
+                recordedWeight, AppColors.GREEN),
             ui.readingCard("Briquettes Produced", value(ui, period, "briquettes", " pcs"), "", AppColors.AMBER)
         }, 2);
         root.addView(ui.sectionTitle("Weekly breakdown", ""));
@@ -66,18 +71,22 @@ public class ReportsScreen implements AppScreen {
         if (weeks != null) {
             LinearLayout table = ui.card(16);
             table.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(4));
-            addWeekRow(ui, table, "Dates", "Paper (kg)", "Briquettes", true);
+            addWeekRow(ui, table, "Dates", hasSheetCount ? "Sheets" : "Paper (kg)", "Briquettes", true);
             for (int i = 0; i < weeks.length(); i++) {
                 JSONObject week = weeks.optJSONObject(i);
                 if (week == null) continue;
-                boolean empty = week.isNull("paperKg") && week.isNull("briquettes");
+                boolean empty = week.isNull(paperField) && week.isNull("briquettes");
                 addWeekRow(ui, table, week.optString("label"),
-                    empty ? "No records" : value(ui, week, "paperKg", ""),
+                    empty ? "No records" : value(ui, week, paperField, ""),
                     empty ? "" : value(ui, week, "briquettes", ""), false);
             }
             root.addView(table, ui.fullWidth(-2, 0, ui.dp(4), 0, ui.dp(12)));
         }
-        root.addView(ui.text("Paper used · Bond paper, 20 lb (about 75 gsm)", 12, AppColors.MUTED, Typeface.NORMAL));
+        String paperReference = "Bond paper, 20 lb (about 75 gsm)";
+        if (hasSheetCount) {
+            paperReference = monthly.optInt("sheetsPerBatch") + " sheets per completed batch · " + paperReference;
+        }
+        root.addView(ui.text(paperReference, 12, AppColors.MUTED, Typeface.NORMAL));
     }
 
     private void selectMonth(boolean lastMonth, LinearLayout root, AppController controller) {

@@ -12,6 +12,7 @@ function normalizeMachineHealth(value) {
   }
   if (value.version === 3) {
     for (const key of ["timedSupported", "heaterOn", "pumpOn", "heaterReady", "pumpReady"]) health[key] = typeof value[key] === "boolean" ? value[key] : null;
+    if (Number.isInteger(value.batchMask) && value.batchMask >= 0 && value.batchMask <= 7) health.batchMask = value.batchMask;
   }
   return health;
 }

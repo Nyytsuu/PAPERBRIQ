@@ -98,6 +98,24 @@ test("HTTP health reporting stays read-only, device-specific, and clears old pas
     assert.equal(final.commands.length, 0);
     assert.equal(final.events.length, 0);
     assert.equal(final.processState, "idle");
+    const batchCommand = {deviceId, command: 'batch_2', supervised: true};
+    const sendBatch = body => request('/api/device/commands', body, 'local-health-test', 'local-control-test');
+    assert.equal((await request('/api/device/commands', batchCommand)).status, 401);
+    assert.equal((await sendBatch(batchCommand)).status, 409);
+    await request('/api/iot/readings', telemetry({...chamberHealthy, version: 3, batchMask: 7, doorClosed: false}));
+    assert.equal((await sendBatch(batchCommand)).status, 409);
+    await request('/api/iot/readings', telemetry({...chamberHealthy, version: 3, batchMask: 6}));
+    assert.deepEqual((await read()).batchControls.available, [2, 3]);
+    assert.equal((await sendBatch({...batchCommand, command: 'batch_1'})).status, 409);
+    assert.equal((await sendBatch({...batchCommand, supervised: false})).status, 409);
+    const batchQueued = await sendBatch(batchCommand);
+    assert.equal(batchQueued.status, 201);
+    assert.equal((await sendBatch(batchCommand)).status, 409);
+    const batchId = batchQueued.body.command.id;
+    await request(`/api/device/commands/next?deviceId=${deviceId}`);
+    const batchAck = await request(`/api/device/commands/${batchId}/ack`, {deviceId, status: 'completed', message: 'started'});
+    assert.equal(batchAck.status, 200);
+    await request('/api/iot/readings', telemetry(undefined));
     const command = {deviceId, command:'self_test', unloadedSupervised:true};
     const send = body => request('/api/device/commands', body, 'local-health-test', 'local-control-test');
     assert.equal((await request('/api/device/commands',command)).status,401);
@@ -124,6 +142,22 @@ test("HTTP health reporting stays read-only, device-specific, and clears old pas
     await postEvent('test_item_done','shredder');
     assert.equal((await read()).componentTests.items[0].checked,true);
     assert.equal((await read()).componentTests.items[0].physicalVerified,false);
+    const reportSheets = async () => (await request("/api/reports")).body.monthly;
+    const completedBatch = {deviceId, type: "batch_completed", component: "process", message: "Batch 1",
+      processState: "running"};
+    assert.equal((await reportSheets()).thisMonth.paperSheets, 0);
+    assert.equal((await request("/api/device/events", completedBatch)).status, 400);
+    const batchOneEvent = {...completedBatch, eventId: "batch-test-1"};
+    assert.equal((await request("/api/device/events", batchOneEvent)).status, 202);
+    assert.equal((await reportSheets()).thisMonth.paperSheets, 4);
+    assert.equal((await request("/api/device/events", batchOneEvent)).status, 202);
+    assert.equal((await reportSheets()).thisMonth.paperSheets, 4);
+    const batchThreeEvent = {...completedBatch, message: "Batch 3", eventId: "batch-test-3"};
+    assert.equal((await request("/api/device/events", batchThreeEvent)).status, 202);
+    const monthly = await reportSheets();
+    assert.equal(monthly.thisMonth.paperSheets, 8);
+    assert.equal(monthly.thisMonth.weeks.reduce((sum, week) => sum + week.paperSheets, 0), 8);
+    assert.equal(monthly.lastMonth.paperSheets, 0);
   } finally {
     await new Promise(resolve => server.close(resolve));
     await dataStore.close();

@@ -116,6 +116,70 @@ int main(int argc, char **argv) {
   assert(timer.tick(140000,10000,2000,2000) && timer.stage == 1);
   assert(timer.tick(142000,10000,2000,2000) && timer.stage == 2);
   setup(); advance(3000); command('R');
+  if (mode == "remote-batches" || mode == "remote-skip") {
+    const auto remote = [](const char *id, const char *action) {
+      const std::string frame = std::string("CMD|") + id + "|" + action + "\n";
+      for (char c : frame) espLink.input.push_back(c);
+      loop();
+    };
+    const auto waitForNextBatch = []() {
+      const unsigned long deadline = millis() + 300000;
+      while (automaticProcessState != PROCESS_WAITING_FOR_NEXT_BATCH && millis() < deadline) advance(10);
+      assert(automaticProcessState == PROCESS_WAITING_FOR_NEXT_BATCH);
+      advance(DIRECTION_CHANGE_PAUSE_MS + 20);
+    };
+    const std::string batchEvent = "EVENT|BATCH_COMPLETED|info|process|running|Batch ";
+    assert(availableBatches() == 7);
+    remote("batch-one", "B1");
+    assert(localCycle.remote && localCycle.batch == 0 && !testOutputs[HEATER_ENABLE_PIN]);
+    awaitShredder();
+    remote("cannot-jump", "B3");
+    assert(localCycle.batch == 0);
+    assert(espLink.output.find("ACK|cannot-jump|FAILED|start_rejected") != std::string::npos);
+    waitForNextBatch();
+    assert(availableBatches() == 6);
+    assert(espLink.output.find(batchEvent + "1\n") != std::string::npos);
+    if (mode == "remote-skip") {
+      remote("skip-batch-two", "B3");
+      assert(localCycle.batch == 2);
+      awaitShredder();
+      const unsigned long deadline = millis() + 300000;
+      while (localCycle.active() && millis() < deadline) {
+        advance(10);
+        assert(!testOutputs[HEATER_ENABLE_PIN]);
+      }
+      assert(!localCycle.active() && automaticProcessState == PROCESS_IDLE);
+      assert(espLink.output.find("EVENT|PROCESS_COMPLETED|") != std::string::npos);
+      assert(espLink.output.find(batchEvent + "2\n") == std::string::npos);
+      assert(espLink.output.find(batchEvent + "3\n") != std::string::npos);
+      return 0;
+    }
+    remote("batch-two", "B2");
+    awaitShredder();
+    assert(localCycle.batch == 1);
+    remote("batch-two", "B2"); // Retrying the same command only replays its ACK.
+    assert(localCycle.batch == 1 && automaticProcessState == PROCESS_SHREDDING_AND_MIXING);
+    injectFault("door");
+    advance(100);
+    assert(softwareStopLatched && motorsOff() && availableBatches() == 0);
+    assert(espLink.output.find(batchEvent + "2\n") == std::string::npos);
+    remote("cannot-restart", "B2");
+    assert(!localCycle.active());
+    Wire.inputs[0x24] &= ~ChamberControl::DOOR;
+    advance(3000);
+    remote("arm-again", "RESET");
+    assert(availableBatches() == 7);
+    remote("retry-batch-two", "B2");
+    assert(localCycle.batch == 1 && localCycle.remote);
+    assert(espLink.output.find("EVENT|PROCESS_STARTED|info|process|running|Batch 2") != std::string::npos);
+    awaitShredder();
+    waitForNextBatch();
+    assert(availableBatches() == 4);
+    const auto batchTwoCompleted = espLink.output.find(batchEvent + "2\n");
+    assert(batchTwoCompleted != std::string::npos);
+    assert(espLink.output.find(batchEvent + "2\n", batchTwoCompleted + 1) == std::string::npos);
+    return 0;
+  }
   if (mode == "load-2" || mode == "load-3" || mode == "skip-door" || mode == "stop-repeat") {
     const char shortcut = mode == "load-2" ? '8' : '9';
     command(shortcut);
@@ -131,7 +195,10 @@ int main(int argc, char **argv) {
     advance(3000);
     command(shortcut);
     assert(localCycle.batch == shortcut - '7');
+    const std::string batchEvent = std::string("|info|process|running|Batch ") + char('1' + localCycle.batch) + "\n";
+    assert(espLink.output.find("EVENT|PROCESS_STARTED" + batchEvent) != std::string::npos);
     awaitShredder();
+    assert(espLink.output.find("EVENT|SHREDDER_MIXER_STARTED" + batchEvent) != std::string::npos);
     command('9'); // The shortcut must not jump while a load is moving.
     assert(localCycle.batch == shortcut - '7');
     if (mode == "load-2" && PAPERBRIQ_ESP_LINK_ENABLED) {

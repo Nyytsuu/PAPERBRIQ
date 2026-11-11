@@ -68,12 +68,6 @@ public class DashboardScreen implements AppScreen {
             () -> controller.showPage("process"), 22);
         root.addView(status, ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, 0, 0, ui.dp(14)));
 
-        ui.addGrid(root, new View[]{
-            shortcut(controller, "Water level", sensorValue(ui, sensors, "Rainwater Level", online, databaseConfigured), AppColors.BLUE, "iot"),
-            shortcut(controller, "Chamber temperature", sensorValue(ui, sensors, "Temperature", dhtReady, databaseConfigured), 0xFFAC5A29, "iot"),
-            shortcut(controller, "Chamber humidity", sensorValue(ui, sensors, "Humidity", dhtReady, databaseConfigured), 0xFF427E96, "iot"),
-            shortcut(controller, "Briquettes made", databaseConfigured ? ui.formatNumber(totals.optInt("briquettes", 0)) : "--", AppColors.GREEN_DARK, "reports")
-        }, 2);
         JSONObject processRun = control.optJSONObject("processRun");
         String processLabel = processRun == null ? "Waiting for step reports"
             : processRun.optString("label", "Waiting for a forming run");
@@ -92,14 +86,25 @@ public class DashboardScreen implements AppScreen {
         progress.addView(progressHeading);
         LinearLayout progressCopy = ui.row();
         progressCopy.setGravity(Gravity.CENTER_VERTICAL);
-        progressCopy.addView(ui.text(processLabel, 17, AppColors.GREEN_DARK, Typeface.BOLD),
-            new LinearLayout.LayoutParams(0, -2, 1));
-        progressCopy.addView(ui.text("View steps", 12, AppColors.MUTED, Typeface.NORMAL));
-        progress.addView(progressCopy, ui.fullWidth(-2, 0, ui.dp(8), 0, ui.dp(6)));
-        progress.addView(ui.text("Drying is not enabled.", 12, AppColors.MUTED, Typeface.NORMAL));
-        ui.interactive(progress, processLabel + ". View process steps",
+        View chart = FormingProgressChart.createCircle(ui, processRun);
+        LinearLayout.LayoutParams chartSize = new LinearLayout.LayoutParams(ui.dp(88), ui.dp(88));
+        chartSize.setMarginEnd(ui.dp(14));
+        progressCopy.addView(chart, chartSize);
+        LinearLayout progressText = ui.column();
+        progressText.addView(ui.text(processLabel, 17, AppColors.GREEN_DARK, Typeface.BOLD));
+        progressText.addView(ui.text(chart.getContentDescription().toString(), 12, AppColors.MUTED, Typeface.NORMAL),
+            ui.fullWidth(-2, 0, ui.dp(4), 0, 0));
+        progressCopy.addView(progressText, new LinearLayout.LayoutParams(0, -2, 1));
+        progress.addView(progressCopy, ui.fullWidth(-2, 0, ui.dp(10), 0, 0));
+        ui.interactive(progress, "Forming progress. " + processLabel + ". " + chart.getContentDescription() + ". View process steps",
             () -> controller.showPage("process"), 20);
-        root.addView(progress);
+        root.addView(progress, ui.fullWidth(-2, 0, 0, 0, ui.dp(14)));
+        ui.addGrid(root, new View[]{
+            shortcut(controller, "Water level", sensorValue(ui, sensors, "Water level", online, databaseConfigured), AppColors.BLUE, "iot"),
+            shortcut(controller, "Chamber temperature", sensorValue(ui, sensors, "Temperature", dhtReady, databaseConfigured), 0xFFAC5A29, "iot"),
+            shortcut(controller, "Chamber humidity", sensorValue(ui, sensors, "Humidity", dhtReady, databaseConfigured), 0xFF427E96, "iot"),
+            shortcut(controller, "Briquettes made", databaseConfigured ? ui.formatNumber(totals.optInt("briquettes", 0)) : "--", AppColors.GREEN_DARK, "reports")
+        }, 2);
         String updated = dashboard.optString("displayTime", "");
         if (!updated.isEmpty()) root.addView(ui.text("Updated " + updated, 12, AppColors.MUTED, Typeface.NORMAL),
             ui.fullWidth(LinearLayout.LayoutParams.WRAP_CONTENT, 0, ui.dp(10), 0, 0));
@@ -126,9 +131,10 @@ public class DashboardScreen implements AppScreen {
         if (!online || sensors == null) return "--";
         for (int index = 0; index < sensors.length(); index++) {
             JSONObject sensor = sensors.optJSONObject(index);
-            if (sensor == null || !name.equalsIgnoreCase(sensor.optString("name", ""))) continue;
+            if (sensor == null || !name.equalsIgnoreCase(ui.equipmentLabel(sensor.optString("name", "")))) continue;
             boolean trustedSource = "esp32".equalsIgnoreCase(sensor.optString("source", "")) || databaseConfigured;
             if (!trustedSource || !sensor.has("value") || sensor.isNull("value")) return "--";
+            if ("Water level".equals(name) && "Offline".equalsIgnoreCase(sensor.optString("status"))) return "--";
             return ui.formatSensorValue(name, sensor.optDouble("value"), sensor.optString("unit", ""));
         }
         return "--";

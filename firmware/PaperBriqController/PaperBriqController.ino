@@ -994,7 +994,7 @@ bool startAutomaticProcess() {
   USB_LOG.print(PROCESS_MIXER_FINISH_MS);
   USB_LOG.println(F(" ms"));
   emitEvent(F("PROCESS_STARTED"), F("info"), F("process"), F("running"),
-            F("Process started"));
+            F("Single batch"));
   return true;
 }
 

@@ -822,6 +822,19 @@ function createMysqlStore(databaseUrl) {
         connection.release();
       }
     },
+    async getMonthlyBatchRecords({ fromSeconds, toSeconds }) {
+      await ensureControlSchema();
+      const [rows] = await pool.execute(
+        `SELECT FLOOR((UNIX_TIMESTAMP(created_at) + ${MANILA_OFFSET_SECONDS}) / ${DAY_SECONDS}) AS report_day,
+                'batches' AS metric, COUNT(*) AS amount
+         FROM device_events
+         WHERE event_type = 'batch_completed' AND event_key IS NOT NULL
+           AND created_at >= FROM_UNIXTIME(?) AND created_at < FROM_UNIXTIME(?)
+         GROUP BY report_day`,
+        [fromSeconds, toSeconds]
+      );
+      return rows;
+    },
     async getMonthlyReportRecords({ fromSeconds, toSeconds }) {
       return withSchemaFallback(async () => {
         const [rows] = await pool.execute(

@@ -32,8 +32,8 @@ available. No Serial Monitor choices or `D`, `R`, `P`, or `W` commands are neede
 If Wi-Fi disconnects, the main loop retries the saved networks automatically.
 
 The startup banner is `PaperBriq monitor starting - automatic Wi-Fi and app connection`.
-The display keeps the 1 MHz SPI drawing speed and rotation `3` used during TFT
-troubleshooting. Automatic network startup does not start the Uno's motors;
+The display uses landscape rotation `1` and a 1 MHz SPI drawing speed.
+Automatic network startup does not start the Uno's motors;
 the existing Reset/Start command flow still applies.
 
 TFT signal wiring: CS → GPIO33, DC/A0 → GPIO21, RESET/RES → GPIO22,
@@ -57,7 +57,15 @@ Both sketches use 9600 baud for this UART link. Never connect the Uno's 5 V TX o
 
 The ESP32 polls Render for the oldest queued command, forwards `START`, `STOP`, `RESET`, `SELF_TEST`, or bounded `HEATER:<seconds>` / `PUMP:<seconds>` commands to the Uno, and reports acknowledgements and machine events back to Render. It never drives a motor or servo directly and does not start movement at boot. Version 3 health reports add timed-output support, commanded heater/pump states, and readiness to the version 2 chamber fields. Older Uno reports remain readable but cannot enable the app timer controls. See [app timer controls](../TIMED_CONTROLS.md) and [Check machine](../MACHINE_CHECK.md) for the supervised tests and required updates.
 
-The TFT header follows Uno machine events and displays `GETTING READY`, `READY / CHECK`, `PROCESS RUNNING`, `PROCESS COMPLETE`, `STOPPED`, or `FAULT / CHECK`. Its status dot blinks while preparing, after completion, and during a fault. The Wi-Fi dot at the right of the header remains green when connected and red when disconnected.
+The TFT keeps the machine status and Wi-Fi indicators visible while it slides
+between two sensor pages every seven seconds. **Chamber / Water** shows
+temperature, humidity, and water level. **Paper Sensors** shows the shredder
+inlet, shredder outlet, and briquette sensor. Readings update in place.
+
+In the ESP32 Serial Monitor at 115200 baud, send `>` to advance a page or
+`~` to freeze or resume the TFT. The ESP32 keeps its Wi-Fi and Uno links
+active while the display is frozen. If the entire screen still pulses, check
+the serial output for a repeated startup banner or a brownout reset.
 
 Upload this ESP32 sketch and `ArduinoUnoMotorTest.ino` to their respective boards. The IDs and keys must match the backend. When testing, issue Reset first to arm the Uno, then Start. Stop is latched until a later Reset.
 

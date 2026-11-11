@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
     assert(testOutputs[3] == LOW);
     const uint32_t sessionAt = localCycle.sessionAt;
     for (char c : std::string("RGPZ1234567EFTBYJUVLQ")) usb(c);
-    assert(!startAutomaticProcess(true) && !startComponentTest() && !armMotorTest());
+    assert(!startAutomaticProcess(DRY_FORMING) && !startComponentTest() && !armMotorTest());
     assert(!runChamberCommand("UNLOCK") && !chamber.unlockOn);
     assert(localCycle.phase == StandaloneCycle::PREHEATING && motorsOff());
     // Waiting is not temperature confirmation: time alone never starts forming.
